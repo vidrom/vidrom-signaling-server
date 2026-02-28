@@ -1,8 +1,24 @@
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const admin = require('firebase-admin');
+const serviceAccount = require('./service-account.json');
+
+// Initialize Firebase Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const os = require('os');
 
 const PORT = 8080;
 const wss = new WebSocketServer({ port: PORT });
+
+// Log server IP and port on startup
+const interfaces = os.networkInterfaces();
+const localIP = Object.values(interfaces)
+  .flat()
+  .find((i) => i.family === 'IPv4' && !i.internal)?.address || 'unknown';
+console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
 
 // Track connected clients by role
 const clients = {
@@ -10,7 +26,8 @@ const clients = {
   home: null,
 };
 
-console.log(`Vidrom signaling server running on ws://0.0.0.0:${PORT}`);
+// Store FCM tokens by role
+const fcmTokens = new Map();
 
 wss.on('connection', (ws) => {
   const id = uuidv4();
@@ -51,6 +68,34 @@ wss.on('connection', (ws) => {
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Home app not connected' }));
           console.log(`[${id}] Ring failed: home not connected`);
+        }
+
+        // Also send FCM push notification to home app
+        const homeToken = fcmTokens.get('home');
+        if (homeToken) {
+          admin.messaging().send({
+            token: homeToken,
+            data: {
+              type: 'incoming-call',
+              callerName: 'Intercom',
+            },
+            android: {
+              priority: 'high',
+            },
+            apns: {
+              headers: { 'apns-priority': '10' },
+              payload: {
+                aps: {
+                  contentAvailable: true,
+                  sound: 'default',
+                },
+              },
+            },
+          })
+            .then(() => console.log(`[${id}] FCM push sent to home`))
+            .catch((err) => console.error(`[${id}] FCM push failed:`, err.message));
+        } else {
+          console.log(`[${id}] No FCM token for home, skipping push`);
         }
         break;
       }
@@ -109,6 +154,16 @@ wss.on('connection', (ws) => {
         if (other && other.readyState === 1) {
           other.send(JSON.stringify({ type: 'hangup' }));
           console.log(`[${id}] Hangup relayed`);
+        }
+        break;
+      }
+
+      case 'register-fcm-token': {
+        if (role) {
+          fcmTokens.set(role, message.token);
+          console.log(`[${id}] FCM token registered for "${role}"`);
+        } else {
+          console.log(`[${id}] FCM token received but no role registered yet`);
         }
         break;
       }

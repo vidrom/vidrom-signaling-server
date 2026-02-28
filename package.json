@@ -7,8 +7,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.16.0",
-    "uuid": "^9.0.0"
+    "firebase-admin": "^13.6.1",
+    "uuid": "^9.0.0",
+    "ws": "^8.16.0"
   },
   "private": true
 }
