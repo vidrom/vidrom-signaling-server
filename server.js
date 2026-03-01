@@ -1,6 +1,7 @@
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
+const http = require('http');
 const serviceAccount = require('./service-account.json');
 
 // Initialize Firebase Admin SDK
@@ -11,14 +12,12 @@ admin.initializeApp({
 const os = require('os');
 
 const PORT = 8080;
-const wss = new WebSocketServer({ port: PORT });
 
-// Log server IP and port on startup
+// Log server IP
 const interfaces = os.networkInterfaces();
 const localIP = Object.values(interfaces)
   .flat()
   .find((i) => i.family === 'IPv4' && !i.internal)?.address || 'unknown';
-console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
 
 // Track connected clients by role
 const clients = {
@@ -28,6 +27,28 @@ const clients = {
 
 // Store FCM tokens by role
 const fcmTokens = new Map();
+
+// Create HTTP server to handle REST endpoints alongside WebSocket
+const httpServer = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/decline') {
+    // Background decline from notification action (no WebSocket available)
+    console.log('[HTTP] Decline request received');
+    if (clients.intercom && clients.intercom.readyState === 1) {
+      clients.intercom.send(JSON.stringify({ type: 'decline' }));
+      console.log('[HTTP] Decline relayed to intercom');
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+const wss = new WebSocketServer({ server: httpServer });
+httpServer.listen(PORT, () => {
+  console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
+});
 
 wss.on('connection', (ws) => {
   const id = uuidv4();
