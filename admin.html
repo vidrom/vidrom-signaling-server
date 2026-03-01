@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vidrom Admin Portal</title>
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f6fa;
+      color: #2d3436;
+      min-height: 100vh;
+    }
+    header {
+      background: #2d3436;
+      color: #fff;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 20px; font-weight: 600; }
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+    }
+    .user-info img {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+    }
+    #signInBtn, #signOutBtn {
+      padding: 8px 20px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    #signInBtn {
+      background: #0984e3;
+      color: #fff;
+    }
+    #signInBtn:hover { background: #0770c2; }
+    #signOutBtn {
+      background: #636e72;
+      color: #fff;
+    }
+    #signOutBtn:hover { background: #4a5457; }
+    .container {
+      max-width: 900px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #636e72;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .form-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .form-group label {
+      font-size: 13px;
+      font-weight: 500;
+      color: #636e72;
+    }
+    .form-group input {
+      padding: 8px 12px;
+      border: 1px solid #dfe6e9;
+      border-radius: 6px;
+      font-size: 14px;
+      width: 200px;
+    }
+    .form-group input:focus {
+      outline: none;
+      border-color: #0984e3;
+      box-shadow: 0 0 0 3px rgba(9,132,227,0.15);
+    }
+    .btn {
+      padding: 8px 20px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s;
+    }
+    .btn-primary { background: #0984e3; color: #fff; }
+    .btn-primary:hover { background: #0770c2; }
+    .btn-primary:disabled { background: #b2bec3; cursor: not-allowed; }
+    .btn-danger { background: #d63031; color: #fff; }
+    .btn-danger:hover { background: #b71c1c; }
+    .btn-danger:disabled { background: #b2bec3; cursor: not-allowed; }
+    .btn-small { padding: 5px 12px; font-size: 13px; }
+    .result-box {
+      margin-top: 16px;
+      padding: 16px;
+      background: #dfe6e9;
+      border-radius: 8px;
+      display: none;
+    }
+    .result-box.success { background: #d4edda; border: 1px solid #c3e6cb; }
+    .result-box.error { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+    .code-display {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: 6px;
+      color: #0984e3;
+      margin: 8px 0;
+      font-family: 'Courier New', monospace;
+    }
+    .copy-btn {
+      padding: 4px 12px;
+      border: 1px solid #0984e3;
+      background: transparent;
+      color: #0984e3;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .copy-btn:hover { background: #0984e3; color: #fff; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 2px solid #dfe6e9;
+      font-size: 13px;
+      font-weight: 600;
+      color: #636e72;
+      text-transform: uppercase;
+    }
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f1f2f6;
+      font-size: 14px;
+    }
+    .status-badge {
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .status-pending { background: #ffeaa7; color: #886a00; }
+    .status-active { background: #a8e6cf; color: #1e7a4a; }
+    .status-revoked { background: #fab1a0; color: #7c1e1e; }
+    .empty-state {
+      text-align: center;
+      padding: 32px;
+      color: #b2bec3;
+    }
+    .login-prompt {
+      text-align: center;
+      padding: 80px 24px;
+    }
+    .login-prompt h2 { font-size: 24px; color: #2d3436; margin-bottom: 12px; text-transform: none; }
+    .login-prompt p { color: #636e72; margin-bottom: 24px; }
+    .access-denied {
+      text-align: center;
+      padding: 80px 24px;
+    }
+    .access-denied h2 { font-size: 24px; color: #d63031; margin-bottom: 12px; text-transform: none; }
+    .access-denied p { color: #636e72; margin-bottom: 24px; }
+    .provisioning-code-cell { font-family: 'Courier New', monospace; font-weight: 600; }
+    .refresh-btn {
+      float: right;
+      cursor: pointer;
+      background: none;
+      border: 1px solid #dfe6e9;
+      border-radius: 6px;
+      padding: 4px 12px;
+      font-size: 13px;
+      color: #636e72;
+    }
+    .refresh-btn:hover { background: #f1f2f6; }
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #dfe6e9;
+      border-top-color: #0984e3;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Vidrom Admin Portal</h1>
+  <div id="authArea">
+    <div id="googleSignInBtn"></div>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Login prompt (shown when not authenticated) -->
+  <div id="loginPrompt" class="card login-prompt">
+    <h2>Welcome to Vidrom Admin</h2>
+    <p>Sign in with an authorized Google account to manage intercom devices.</p>
+  </div>
+
+  <!-- Access denied (shown for unauthorized accounts) -->
+  <div id="accessDenied" class="card access-denied" style="display:none;">
+    <h2>Access Denied</h2>
+    <p>Your Google account is not authorized to access this portal.</p>
+    <button id="signOutBtn2" class="btn btn-primary" onclick="handleSignOut()">Sign Out</button>
+  </div>
+
+  <!-- Admin content (shown when authenticated) -->
+  <div id="adminContent" style="display:none;">
+    <!-- Create Device Card -->
+    <div class="card">
+      <h2>Create New Device</h2>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="buildingId">Building ID</label>
+          <input type="text" id="buildingId" placeholder="e.g. bldg-42" />
+        </div>
+        <div class="form-group">
+          <label for="deviceName">Device Name</label>
+          <input type="text" id="deviceName" placeholder="e.g. Front Door" />
+        </div>
+        <button class="btn btn-primary" id="createBtn" onclick="handleCreateDevice()">Create Device</button>
+      </div>
+      <div id="createResult" class="result-box"></div>
+    </div>
+
+    <!-- Devices Table Card -->
+    <div class="card">
+      <h2>
+        Devices
+        <button class="refresh-btn" onclick="loadDevices()">&#x21bb; Refresh</button>
+      </h2>
+      <div id="devicesContainer">
+        <div class="empty-state">Loading devices...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- Configuration ---
+  const ADMIN_EMAILS = ['wwguyww@gmail.com', 'ronenwes@gmail.com'];
+  // Replace with your actual Google OAuth Client ID from Step 9.1
+  const GOOGLE_CLIENT_ID = '1070504632843-t3ohfvsimcqsjspt31v8ajpvdffait6c.apps.googleusercontent.com';
+
+  // --- State ---
+  let idToken = null;
+  let userEmail = null;
+  let userName = null;
+  let userPicture = null;
+
+  // --- Google Identity Services ---
+  window.onload = function () {
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: handleCredentialResponse,
+    });
+    // Render the Google Sign-In button
+    google.accounts.id.renderButton(
+      document.getElementById('googleSignInBtn'),
+      { theme: 'outline', size: 'large', type: 'standard' }
+    );
+  };
+
+  function handleCredentialResponse(response) {
+    idToken = response.credential;
+
+    // Decode JWT payload to get user info
+    const payload = JSON.parse(atob(idToken.split('.')[1]));
+    userEmail = payload.email;
+    userName = payload.name;
+    userPicture = payload.picture;
+
+    // Check admin whitelist client-side
+    if (!ADMIN_EMAILS.includes(userEmail)) {
+      showAccessDenied();
+      return;
+    }
+
+    showAdminUI();
+    loadDevices();
+  }
+
+  function handleSignOut() {
+    google.accounts.id.disableAutoSelect();
+    idToken = null;
+    userEmail = null;
+    userName = null;
+    userPicture = null;
+    showLoginPrompt();
+  }
+
+  // --- UI State Management ---
+  function showLoginPrompt() {
+    document.getElementById('loginPrompt').style.display = '';
+    document.getElementById('accessDenied').style.display = 'none';
+    document.getElementById('adminContent').style.display = 'none';
+    document.getElementById('authArea').innerHTML = '<div id="googleSignInBtn"></div>';
+    google.accounts.id.renderButton(
+      document.getElementById('googleSignInBtn'),
+      { theme: 'outline', size: 'large', type: 'standard' }
+    );
+  }
+
+  function showAccessDenied() {
+    document.getElementById('loginPrompt').style.display = 'none';
+    document.getElementById('accessDenied').style.display = '';
+    document.getElementById('adminContent').style.display = 'none';
+    document.getElementById('authArea').innerHTML =
+      `<div class="user-info">
+        <span>${escapeHtml(userEmail)}</span>
+        <button id="signOutBtn" onclick="handleSignOut()">Sign Out</button>
+      </div>`;
+  }
+
+  function showAdminUI() {
+    document.getElementById('loginPrompt').style.display = 'none';
+    document.getElementById('accessDenied').style.display = 'none';
+    document.getElementById('adminContent').style.display = '';
+    document.getElementById('authArea').innerHTML =
+      `<div class="user-info">
+        ${userPicture ? `<img src="${escapeHtml(userPicture)}" alt="" />` : ''}
+        <span>${escapeHtml(userName || userEmail)}</span>
+        <button id="signOutBtn" onclick="handleSignOut()">Sign Out</button>
+      </div>`;
+  }
+
+  // --- API Functions ---
+  async function apiCall(url, options = {}) {
+    const headers = {
+      'Authorization': `Bearer ${idToken}`,
+      ...options.headers,
+    };
+
+    try {
+      const res = await fetch(url, { ...options, headers });
+      if (res.status === 401) {
+        alert('Session expired. Please sign in again.');
+        handleSignOut();
+        return null;
+      }
+      return await res.json();
+    } catch (err) {
+      console.error('API call failed:', err);
+      alert('Network error. Please try again.');
+      return null;
+    }
+  }
+
+  async function loadDevices() {
+    const container = document.getElementById('devicesContainer');
+    container.innerHTML = '<div class="empty-state"><span class="spinner"></span> Loading devices...</div>';
+
+    const devices = await apiCall('/api/admin/devices');
+    if (!devices) return;
+
+    if (!Array.isArray(devices) || devices.length === 0) {
+      container.innerHTML = '<div class="empty-state">No devices yet. Create one above.</div>';
+      return;
+    }
+
+    // Sort: pending first, then active, then revoked; newest first within each group
+    const statusOrder = { pending: 0, active: 1, revoked: 2 };
+    devices.sort((a, b) => {
+      const so = (statusOrder[a.status] || 9) - (statusOrder[b.status] || 9);
+      if (so !== 0) return so;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
+    let html = `<table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Building</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+    for (const d of devices) {
+      const statusClass = `status-${d.status}`;
+      const created = new Date(d.createdAt).toLocaleDateString();
+      const revokeDisabled = d.status === 'revoked' ? 'disabled' : '';
+
+      html += `<tr>
+        <td>${escapeHtml(d.name)}</td>
+        <td>${escapeHtml(d.buildingId)}</td>
+        <td><span class="status-badge ${statusClass}">${d.status}</span></td>
+        <td>${created}</td>
+        <td>
+          ${d.status !== 'revoked'
+            ? `<button class="btn btn-danger btn-small" onclick="handleRevoke('${d.deviceId}')" ${revokeDisabled}>Revoke</button>`
+            : '<span style="color:#b2bec3">—</span>'}
+        </td>
+      </tr>`;
+    }
+
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  async function handleCreateDevice() {
+    const buildingId = document.getElementById('buildingId').value.trim();
+    const name = document.getElementById('deviceName').value.trim();
+    const resultBox = document.getElementById('createResult');
+
+    if (!buildingId || !name) {
+      resultBox.style.display = 'block';
+      resultBox.className = 'result-box error';
+      resultBox.innerHTML = 'Please fill in both Building ID and Device Name.';
+      return;
+    }
+
+    const createBtn = document.getElementById('createBtn');
+    createBtn.disabled = true;
+    createBtn.textContent = 'Creating...';
+
+    const data = await apiCall('/api/admin/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ buildingId, name }),
+    });
+
+    createBtn.disabled = false;
+    createBtn.textContent = 'Create Device';
+
+    if (!data) return;
+
+    if (data.error) {
+      resultBox.style.display = 'block';
+      resultBox.className = 'result-box error';
+      resultBox.innerHTML = `Error: ${escapeHtml(data.error)}`;
+      return;
+    }
+
+    resultBox.style.display = 'block';
+    resultBox.className = 'result-box success';
+    resultBox.innerHTML = `
+      <div>Device created successfully!</div>
+      <div>Device ID: <code>${escapeHtml(data.deviceId)}</code></div>
+      <div style="margin-top:8px;">Provisioning Code:</div>
+      <div class="code-display">${escapeHtml(data.provisioningCode)}</div>
+      <button class="copy-btn" onclick="copyCode('${escapeHtml(data.provisioningCode)}')">
+        &#128203; Copy Code
+      </button>
+    `;
+
+    // Clear form
+    document.getElementById('buildingId').value = '';
+    document.getElementById('deviceName').value = '';
+
+    // Refresh device list
+    loadDevices();
+  }
+
+  async function handleRevoke(deviceId) {
+    if (!confirm('Are you sure you want to revoke this device? This cannot be undone.')) {
+      return;
+    }
+
+    const data = await apiCall(`/api/admin/devices/${deviceId}/revoke`, {
+      method: 'POST',
+    });
+
+    if (data && data.success) {
+      loadDevices();
+    }
+  }
+
+  function copyCode(code) {
+    navigator.clipboard.writeText(code).then(() => {
+      const btn = event.target;
+      const original = btn.textContent;
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    }).catch(() => {
+      // Fallback
+      prompt('Copy this code:', code);
+    });
+  }
+
+  // --- Utility ---
+  function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+</script>
+
+</body>
+</html>

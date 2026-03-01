@@ -1,104 +1,11 @@
-const { WebSocketServer } = require('ws');
+// WebSocket connection handler — message routing and signaling logic
 const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
-const http = require('http');
-const serviceAccount = require('./service-account.json');
+const { verifyToken } = require('./auth');
+const { getDevice } = require('./devices');
+const { clients, fcmTokens, setPendingRing, clearPendingRing, isPendingRing } = require('./connectionState');
 
-// Initialize Firebase Admin SDK
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
-const os = require('os');
-
-const PORT = 8080;
-
-// Log server IP
-const interfaces = os.networkInterfaces();
-const localIP = Object.values(interfaces)
-  .flat()
-  .find((i) => i.family === 'IPv4' && !i.internal)?.address || 'unknown';
-
-// Track connected clients by role
-const clients = {
-  intercom: null,
-  home: null,
-};
-
-// Store FCM tokens by role
-const fcmTokens = new Map();
-
-// Pending ring state — survives between WebSocket connections
-let pendingRing = false;
-let pendingRingTimeout = null;
-
-function setPendingRing() {
-  pendingRing = true;
-  clearPendingRingTimeout();
-  // Auto-clear after 30 seconds (ring timeout)
-  pendingRingTimeout = setTimeout(() => {
-    console.log('[PENDING] Ring expired after 30s');
-    pendingRing = false;
-  }, 30000);
-}
-
-function clearPendingRing() {
-  pendingRing = false;
-  clearPendingRingTimeout();
-}
-
-function clearPendingRingTimeout() {
-  if (pendingRingTimeout) {
-    clearTimeout(pendingRingTimeout);
-    pendingRingTimeout = null;
-  }
-}
-
-// Create HTTP server to handle REST endpoints alongside WebSocket
-const httpServer = http.createServer((req, res) => {
-  if (req.method === 'POST' && req.url === '/decline') {
-    // Background decline from notification action (no WebSocket available)
-    console.log('[HTTP] Decline request received');
-    clearPendingRing();
-    if (clients.intercom && clients.intercom.readyState === 1) {
-      clients.intercom.send(JSON.stringify({ type: 'decline' }));
-      console.log('[HTTP] Decline relayed to intercom');
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
-  } else if (req.method === 'POST' && req.url === '/register-fcm-token') {
-    // Register FCM token via HTTP (so home app doesn't need persistent WS)
-    let body = '';
-    req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const { role, token } = JSON.parse(body);
-        if (role && token) {
-          fcmTokens.set(role, token);
-          console.log(`[HTTP] FCM token registered for "${role}"`);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } else {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'role and token required' }));
-        }
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON' }));
-      }
-    });
-  } else {
-    res.writeHead(404);
-    res.end();
-  }
-});
-
-const wss = new WebSocketServer({ server: httpServer });
-httpServer.listen(PORT, () => {
-  console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
-});
-
-wss.on('connection', (ws) => {
+function handleConnection(ws) {
   const id = uuidv4();
   let role = null;
 
@@ -123,12 +30,42 @@ wss.on('connection', (ws) => {
           console.error(`[${id}] Invalid role: ${role}`);
           return;
         }
+
+        // Intercom devices must authenticate with a JWT
+        if (role === 'intercom') {
+          if (!message.token) {
+            console.log(`[${id}] Intercom registration rejected: no token`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
+            ws.close();
+            return;
+          }
+
+          try {
+            const decoded = verifyToken(message.token);
+            const device = getDevice(decoded.deviceId);
+
+            if (!device || device.status !== 'active') {
+              console.log(`[${id}] Intercom registration rejected: device revoked or not found`);
+              ws.send(JSON.stringify({ type: 'error', message: 'Device revoked or not found' }));
+              ws.close();
+              return;
+            }
+
+            console.log(`[${id}] Intercom authenticated: device=${decoded.deviceId}, building=${decoded.buildingId}`);
+          } catch (err) {
+            console.log(`[${id}] Intercom registration rejected: invalid token`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
+            ws.close();
+            return;
+          }
+        }
+
         clients[role] = ws;
         console.log(`[${id}] Registered as "${role}"`);
         ws.send(JSON.stringify({ type: 'registered', role }));
 
         // If home just connected and there's a pending ring, re-send it
-        if (role === 'home' && pendingRing) {
+        if (role === 'home' && isPendingRing()) {
           console.log(`[${id}] Re-sending pending ring to home`);
           ws.send(JSON.stringify({ type: 'ring' }));
         }
@@ -292,4 +229,6 @@ wss.on('connection', (ws) => {
   ws.on('error', (err) => {
     console.error(`[${id}] Error:`, err.message);
   });
-});
+}
+
+module.exports = { handleConnection };
