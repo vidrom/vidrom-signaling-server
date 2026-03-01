@@ -28,17 +28,65 @@ const clients = {
 // Store FCM tokens by role
 const fcmTokens = new Map();
 
+// Pending ring state — survives between WebSocket connections
+let pendingRing = false;
+let pendingRingTimeout = null;
+
+function setPendingRing() {
+  pendingRing = true;
+  clearPendingRingTimeout();
+  // Auto-clear after 30 seconds (ring timeout)
+  pendingRingTimeout = setTimeout(() => {
+    console.log('[PENDING] Ring expired after 30s');
+    pendingRing = false;
+  }, 30000);
+}
+
+function clearPendingRing() {
+  pendingRing = false;
+  clearPendingRingTimeout();
+}
+
+function clearPendingRingTimeout() {
+  if (pendingRingTimeout) {
+    clearTimeout(pendingRingTimeout);
+    pendingRingTimeout = null;
+  }
+}
+
 // Create HTTP server to handle REST endpoints alongside WebSocket
 const httpServer = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/decline') {
     // Background decline from notification action (no WebSocket available)
     console.log('[HTTP] Decline request received');
+    clearPendingRing();
     if (clients.intercom && clients.intercom.readyState === 1) {
       clients.intercom.send(JSON.stringify({ type: 'decline' }));
       console.log('[HTTP] Decline relayed to intercom');
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+  } else if (req.method === 'POST' && req.url === '/register-fcm-token') {
+    // Register FCM token via HTTP (so home app doesn't need persistent WS)
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { role, token } = JSON.parse(body);
+        if (role && token) {
+          fcmTokens.set(role, token);
+          console.log(`[HTTP] FCM token registered for "${role}"`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'role and token required' }));
+        }
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      }
+    });
   } else {
     res.writeHead(404);
     res.end();
@@ -78,17 +126,24 @@ wss.on('connection', (ws) => {
         clients[role] = ws;
         console.log(`[${id}] Registered as "${role}"`);
         ws.send(JSON.stringify({ type: 'registered', role }));
+
+        // If home just connected and there's a pending ring, re-send it
+        if (role === 'home' && pendingRing) {
+          console.log(`[${id}] Re-sending pending ring to home`);
+          ws.send(JSON.stringify({ type: 'ring' }));
+        }
         break;
       }
 
       case 'ring': {
         // Intercom rings the home app
+        setPendingRing();
+
         if (clients.home && clients.home.readyState === 1) {
           clients.home.send(JSON.stringify({ type: 'ring' }));
           console.log(`[${id}] Ring relayed to home`);
         } else {
-          ws.send(JSON.stringify({ type: 'error', message: 'Home app not connected' }));
-          console.log(`[${id}] Ring failed: home not connected`);
+          console.log(`[${id}] Home not connected via WS, pending ring set`);
         }
 
         // Also send FCM push notification to home app
@@ -123,6 +178,7 @@ wss.on('connection', (ws) => {
 
       case 'accept': {
         // Home accepts the call
+        clearPendingRing();
         if (clients.intercom && clients.intercom.readyState === 1) {
           clients.intercom.send(JSON.stringify({ type: 'accept' }));
           console.log(`[${id}] Accept relayed to intercom`);
@@ -132,6 +188,7 @@ wss.on('connection', (ws) => {
 
       case 'decline': {
         // Home declines the call
+        clearPendingRing();
         if (clients.intercom && clients.intercom.readyState === 1) {
           clients.intercom.send(JSON.stringify({ type: 'decline' }));
           console.log(`[${id}] Decline relayed to intercom`);
@@ -171,10 +228,32 @@ wss.on('connection', (ws) => {
 
       case 'hangup': {
         // Either side hangs up
+        clearPendingRing();
         const other = role === 'intercom' ? clients.home : clients.intercom;
         if (other && other.readyState === 1) {
           other.send(JSON.stringify({ type: 'hangup' }));
           console.log(`[${id}] Hangup relayed`);
+        }
+        break;
+      }
+
+      case 'watch': {
+        // Home wants to view intercom camera
+        if (clients.intercom && clients.intercom.readyState === 1) {
+          clients.intercom.send(JSON.stringify({ type: 'watch' }));
+          console.log(`[${id}] Watch request relayed to intercom`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Intercom not connected' }));
+        }
+        break;
+      }
+
+      case 'watch-end': {
+        // Home stops watching
+        const target3 = role === 'home' ? clients.intercom : clients.home;
+        if (target3 && target3.readyState === 1) {
+          target3.send(JSON.stringify({ type: 'watch-end' }));
+          console.log(`[${id}] Watch-end relayed`);
         }
         break;
       }
@@ -198,6 +277,10 @@ wss.on('connection', (ws) => {
     console.log(`[${id}] Disconnected (role: ${role})`);
     if (role && clients[role] === ws) {
       clients[role] = null;
+      // If intercom disconnects, clear pending ring
+      if (role === 'intercom') {
+        clearPendingRing();
+      }
       // Notify the other side
       const other = role === 'intercom' ? clients.home : clients.intercom;
       if (other && other.readyState === 1) {
