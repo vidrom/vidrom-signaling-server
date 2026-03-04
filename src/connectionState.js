@@ -9,6 +9,9 @@ const clients = {
 // Store FCM tokens by role
 const fcmTokens = new Map();
 
+// Store VoIP push tokens by role (iOS)
+const voipTokens = new Map();
+
 // Pending ring state — survives between WebSocket connections
 let pendingRing = false;
 let pendingRingTimeout = null;
@@ -42,6 +45,7 @@ function isPendingRing() {
 module.exports = {
   clients,
   fcmTokens,
+  voipTokens,
   setPendingRing,
   clearPendingRing,
   isPendingRing,

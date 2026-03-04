@@ -4,7 +4,7 @@ const path = require('path');
 const { verifyAdminToken } = require('./adminAuth');
 const { generateDeviceToken } = require('./auth');
 const { createDevice, validateProvisioningCode, revokeDevice, listDevices } = require('./devices');
-const { clients, fcmTokens, clearPendingRing } = require('./connectionState');
+const { clients, fcmTokens, voipTokens, clearPendingRing } = require('./connectionState');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -73,6 +73,22 @@ async function handleRequest(req, res) {
       if (role && token) {
         fcmTokens.set(role, token);
         console.log(`[HTTP] FCM token registered for "${role}"`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'role and token required' }));
+      }
+    }).catch(() => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+    });
+  } else if (req.method === 'POST' && req.url === '/register-voip-token') {
+    // Register VoIP push token for iOS (used for CallKit incoming calls)
+    readBody(req).then(({ role, token }) => {
+      if (role && token) {
+        voipTokens.set(role, token);
+        console.log(`[HTTP] VoIP token registered for "${role}"`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       } else {
