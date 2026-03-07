@@ -5,6 +5,7 @@ const os = require('os');
 const serviceAccount = require('../service-account.json');
 const { handleRequest } = require('./httpRoutes');
 const { handleConnection } = require('./wsHandler');
+const { testConnection } = require('./db');
 
 // Initialize Firebase Admin SDK
 admin.initializeApp({
@@ -26,6 +27,7 @@ const httpServer = http.createServer((req, res) => handleRequest(req, res));
 const wss = new WebSocketServer({ server: httpServer });
 wss.on('connection', handleConnection);
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, async () => {
   console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
+  await testConnection();
 });
