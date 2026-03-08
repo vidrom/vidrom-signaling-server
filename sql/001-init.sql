@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS intercoms (
     name            VARCHAR(255) NOT NULL,
     gate_id         VARCHAR(50),
     status          VARCHAR(20)  NOT NULL DEFAULT 'disconnected' CHECK (status IN ('connected', 'disconnected')),
+    provisioning_code   VARCHAR(10),
+    provisioning_status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (provisioning_status IN ('pending', 'active', 'revoked')),
     is_door_open    BOOLEAN      NOT NULL DEFAULT false,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS intercoms (
 
 CREATE INDEX IF NOT EXISTS idx_intercoms_building_id ON intercoms (building_id);
 CREATE INDEX IF NOT EXISTS idx_intercoms_status ON intercoms (status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_intercoms_provisioning_code ON intercoms (provisioning_code) WHERE provisioning_code IS NOT NULL;
 
 -- ────────────────────────────────────────────────────────────────
 

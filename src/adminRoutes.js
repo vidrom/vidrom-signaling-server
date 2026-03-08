@@ -234,15 +234,13 @@ async function listDevices() {
 async function createDevice(body) {
   const { building_id, name, gate_id } = body;
   if (!building_id || !name) return { error: 'building_id and name are required', status: 400 };
-  // Generate 6-digit provisioning code
+  // Generate 6-digit provisioning code, stored in DB for persistent provisioning
   const provisioningCode = Math.floor(100000 + Math.random() * 900000).toString();
   const result = await query(
-    'INSERT INTO intercoms (building_id, name, gate_id) VALUES ($1, $2, $3) RETURNING *',
-    [building_id, name, gate_id || null]
+    'INSERT INTO intercoms (building_id, name, gate_id, provisioning_code, provisioning_status) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [building_id, name, gate_id || null, provisioningCode, 'pending']
   );
-  // Store provisioning code in memory for now (will be used during device setup)
-  const device = result.rows[0];
-  return { ...device, provisioning_code: provisioningCode };
+  return result.rows[0];
 }
 
 async function updateDevice(id, body) {
@@ -274,7 +272,7 @@ async function deleteDevice(id) {
 
 async function revokeDevice(id) {
   const result = await query(
-    "UPDATE intercoms SET status = 'disconnected' WHERE id = $1 RETURNING *",
+    "UPDATE intercoms SET status = 'disconnected', provisioning_status = 'revoked' WHERE id = $1 RETURNING *",
     [id]
   );
   if (result.rows.length === 0) return { error: 'Intercom not found', status: 404 };

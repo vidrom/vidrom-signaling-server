@@ -4,14 +4,16 @@ const admin = require('firebase-admin');
 const { verifyToken } = require('./auth');
 const { getDevice } = require('./devices');
 const { clients, fcmTokens, setPendingRing, clearPendingRing, isPendingRing } = require('./connectionState');
+const { query } = require('./db');
 
 function handleConnection(ws) {
   const id = uuidv4();
   let role = null;
+  let deviceId = null;
 
   console.log(`[${id}] New connection`);
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     let message;
     try {
       message = JSON.parse(data);
@@ -31,19 +33,31 @@ function handleConnection(ws) {
           return;
         }
 
-        // Intercom devices must authenticate with a JWT
-        // TODO: Re-enable device auth after upgrading to persistent device storage
-        // Currently disabled because in-memory device map is wiped on server restart
+        // Intercom devices must authenticate with a JWT backed by persistent DB
         if (role === 'intercom') {
-          if (message.token) {
-            try {
-              const decoded = verifyToken(message.token);
-              console.log(`[${id}] Intercom token present: device=${decoded.deviceId}, building=${decoded.buildingId}`);
-            } catch (err) {
-              console.log(`[${id}] Intercom token invalid (ignored): ${err.message}`);
+          if (!message.token) {
+            console.error(`[${id}] Intercom rejected: no token provided`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
+            ws.close();
+            return;
+          }
+          try {
+            const decoded = verifyToken(message.token);
+            const device = await getDevice(decoded.deviceId);
+            if (!device || device.status !== 'active') {
+              console.error(`[${id}] Intercom rejected: device ${decoded.deviceId} not active`);
+              ws.send(JSON.stringify({ type: 'error', message: 'Device revoked or not found' }));
+              ws.close();
+              return;
             }
-          } else {
-            console.log(`[${id}] Intercom connected without token (auth disabled)`);
+            deviceId = decoded.deviceId;
+            console.log(`[${id}] Intercom authenticated: device=${decoded.deviceId}, building=${decoded.buildingId}`);
+            await query("UPDATE intercoms SET status = 'connected' WHERE id = $1", [deviceId]);
+          } catch (err) {
+            console.error(`[${id}] Intercom rejected: invalid token — ${err.message}`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
+            ws.close();
+            return;
           }
         }
 
@@ -201,9 +215,13 @@ function handleConnection(ws) {
     console.log(`[${id}] Disconnected (role: ${role})`);
     if (role && clients[role] === ws) {
       clients[role] = null;
-      // If intercom disconnects, clear pending ring
+      // If intercom disconnects, clear pending ring and update DB status
       if (role === 'intercom') {
         clearPendingRing();
+        if (deviceId) {
+          query("UPDATE intercoms SET status = 'disconnected' WHERE id = $1", [deviceId])
+            .catch(err => console.error(`[${id}] Failed to update intercom status:`, err.message));
+        }
       }
       // Notify the other side
       const other = role === 'intercom' ? clients.home : clients.intercom;

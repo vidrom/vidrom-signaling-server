@@ -349,9 +349,8 @@ async function handleRequest(req, res) {
         json(res, { error: 'Provisioning code required' }, 400);
         return;
       }
-      // TODO: migrate provisioning to database-backed flow
       const { validateProvisioningCode } = require('./devices');
-      const device = validateProvisioningCode(code);
+      const device = await validateProvisioningCode(code);
       if (!device) {
         json(res, { error: 'Invalid or expired code' }, 401);
         return;
