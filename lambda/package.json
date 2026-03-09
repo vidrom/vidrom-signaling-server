@@ -1,0 +1,11 @@
+{
+  "name": "vidrom-lambda-api",
+  "version": "1.0.0",
+  "description": "REST API Lambda functions for Vidrom admin and management portals",
+  "main": "handler.js",
+  "dependencies": {
+    "google-auth-library": "^9.0.0",
+    "pg": "^8.20.0"
+  },
+  "private": true
+}

@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vidrom Management Portal</title>
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f6fa; color: #2d3436; min-height: 100vh; }
+    header { background: #0c2461; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 20px; font-weight: 600; }
+    .user-info { display: flex; align-items: center; gap: 12px; font-size: 14px; }
+    .user-info img { width: 32px; height: 32px; border-radius: 50%; }
+    #signOutBtn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; background: rgba(255,255,255,0.2); color: #fff; }
+    #signOutBtn:hover { background: rgba(255,255,255,0.3); }
+    .container { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+
+    /* Building selector */
+    .building-selector { margin-bottom: 20px; display: flex; align-items: center; gap: 12px; }
+    .building-selector label { font-weight: 600; color: #0c2461; }
+    .building-selector select { padding: 8px 16px; border: 2px solid #0c2461; border-radius: 8px; font-size: 14px; min-width: 250px; }
+
+    /* Navigation tabs */
+    .nav-tabs { display: flex; gap: 4px; margin-bottom: 24px; flex-wrap: wrap; }
+    .nav-tab { padding: 10px 20px; border: none; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 14px; font-weight: 500; background: #dfe6e9; color: #636e72; transition: all 0.15s; }
+    .nav-tab:hover { background: #b2bec3; color: #2d3436; }
+    .nav-tab.active { background: #fff; color: #0c2461; box-shadow: 0 -2px 0 #0c2461 inset; }
+
+    /* Cards */
+    .card { background: #fff; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+    .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #636e72; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; justify-content: space-between; }
+
+    /* Forms */
+    .form-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+    .form-group { display: flex; flex-direction: column; gap: 4px; }
+    .form-group label { font-size: 13px; font-weight: 500; color: #636e72; }
+    .form-group input, .form-group select, .form-group textarea { padding: 8px 12px; border: 1px solid #dfe6e9; border-radius: 6px; font-size: 14px; min-width: 160px; }
+    .form-group input:focus, .form-group select:focus { outline: none; border-color: #0c2461; box-shadow: 0 0 0 3px rgba(12,36,97,0.15); }
+
+    /* Buttons */
+    .btn { padding: 8px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.15s; }
+    .btn-primary { background: #0c2461; color: #fff; }
+    .btn-primary:hover { background: #091b4a; }
+    .btn-primary:disabled { background: #b2bec3; cursor: not-allowed; }
+    .btn-danger { background: #d63031; color: #fff; }
+    .btn-danger:hover { background: #b71c1c; }
+    .btn-small { padding: 5px 12px; font-size: 13px; }
+    .btn-success { background: #00b894; color: #fff; }
+    .btn-success:hover { background: #00a381; }
+    .btn-outline { background: transparent; border: 1px solid #dfe6e9; color: #636e72; }
+    .btn-outline:hover { background: #f1f2f6; }
+    .refresh-btn { float: right; cursor: pointer; background: none; border: 1px solid #dfe6e9; border-radius: 6px; padding: 4px 12px; font-size: 13px; color: #636e72; }
+    .refresh-btn:hover { background: #f1f2f6; }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 10px 12px; border-bottom: 2px solid #dfe6e9; font-size: 13px; font-weight: 600; color: #636e72; text-transform: uppercase; }
+    td { padding: 10px 12px; border-bottom: 1px solid #f1f2f6; font-size: 14px; }
+    tr:hover { background: #f8f9fa; }
+
+    /* Status badges */
+    .status-badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+    .status-connected { background: #a8e6cf; color: #1e7a4a; }
+    .status-disconnected { background: #fab1a0; color: #7c1e1e; }
+
+    /* Other */
+    .empty-state { text-align: center; padding: 32px; color: #b2bec3; }
+    .login-prompt { text-align: center; padding: 80px 24px; }
+    .login-prompt h2 { font-size: 24px; color: #0c2461; margin-bottom: 12px; text-transform: none; }
+    .login-prompt p { color: #636e72; margin-bottom: 24px; }
+    .access-denied { text-align: center; padding: 80px 24px; }
+    .access-denied h2 { font-size: 24px; color: #d63031; margin-bottom: 12px; text-transform: none; }
+    .access-denied p { color: #636e72; margin-bottom: 24px; }
+    .code-display { font-size: 28px; font-weight: 700; letter-spacing: 6px; color: #0c2461; margin: 8px 0; font-family: 'Courier New', monospace; }
+    .result-box { margin-top: 12px; padding: 12px 16px; border-radius: 8px; display: none; }
+    .result-box.success { display: block; background: #d4edda; border: 1px solid #c3e6cb; }
+    .result-box.error { display: block; background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+    .section { display: none; }
+    .section.active { display: block; }
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #dfe6e9; border-top-color: #0c2461; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Modal */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
+    .modal-overlay.active { display: flex; }
+    .modal { background: #fff; border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
+    .modal h3 { margin-bottom: 16px; font-size: 18px; }
+    .modal .form-group { margin-bottom: 12px; }
+    .modal .form-group input, .modal .form-group select { width: 100%; }
+    .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
+    .inline-actions { display: flex; gap: 4px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Vidrom Management Portal</h1>
+  <div id="authArea"><div id="googleSignInBtn"></div></div>
+</header>
+
+<div class="container">
+  <div id="loginPrompt" class="card login-prompt">
+    <h2>Welcome to Vidrom Management</h2>
+    <p>Sign in with your Google account to manage your assigned buildings.</p>
+  </div>
+
+  <div id="accessDenied" class="card access-denied" style="display:none;">
+    <h2>Access Denied</h2>
+    <p>Your Google account does not have manager access. Contact a system administrator.</p>
+    <button class="btn btn-primary" onclick="handleSignOut()">Sign Out</button>
+  </div>
+
+  <div id="mgmtContent" style="display:none;">
+    <!-- Building Selector -->
+    <div class="building-selector">
+      <label>Building:</label>
+      <select id="buildingSelect" onchange="onBuildingChange()">
+        <option value="">All Buildings</option>
+      </select>
+    </div>
+
+    <div class="nav-tabs">
+      <button class="nav-tab active" onclick="showSection('building-settings')">Settings</button>
+      <button class="nav-tab" onclick="showSection('apartments')">Apartments</button>
+      <button class="nav-tab" onclick="showSection('devices')">Intercoms</button>
+      <button class="nav-tab" onclick="showSection('notifications')">Notifications</button>
+      <button class="nav-tab" onclick="showSection('audit')">Audit Logs</button>
+    </div>
+
+    <!-- ═══ Building Settings Section ═══ -->
+    <div id="sec-building-settings" class="section active">
+      <div class="card">
+        <h2>Building Settings</h2>
+        <div id="buildingSettingsContent">
+          <div class="empty-state">Select a building to view settings.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Apartments Section ═══ -->
+    <div id="sec-apartments" class="section">
+      <div class="card">
+        <h2>Apartments <button class="refresh-btn" onclick="loadApartments()">&#x21bb; Refresh</button></h2>
+        <div class="form-row" id="aptCreateRow" style="display:none;">
+          <div class="form-group"><label>Number</label><input id="aptNumber" placeholder="e.g. 4A" style="min-width:100px;" /></div>
+          <div class="form-group"><label>Name</label><input id="aptName" placeholder="Optional" style="min-width:120px;" /></div>
+          <button class="btn btn-primary" onclick="createApartment()">Add Apartment</button>
+        </div>
+        <div id="apartmentsTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Intercoms Section ═══ -->
+    <div id="sec-devices" class="section">
+      <div class="card">
+        <h2>Intercoms <button class="refresh-btn" onclick="loadDevices()">&#x21bb; Refresh</button></h2>
+        <div class="form-row" id="devCreateRow" style="display:none;">
+          <div class="form-group"><label>Name</label><input id="devName" placeholder="e.g. Front Door" /></div>
+          <div class="form-group"><label>Gate ID</label><input id="devGate" placeholder="Optional" style="min-width:100px;" /></div>
+          <button class="btn btn-primary" onclick="createDevice()">Add Intercom</button>
+        </div>
+        <div id="devResult" class="result-box"></div>
+        <div id="devicesTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Notifications Section ═══ -->
+    <div id="sec-notifications" class="section">
+      <div class="card">
+        <h2>Notifications <button class="refresh-btn" onclick="loadNotifications()">&#x21bb; Refresh</button></h2>
+        <div class="form-row" id="notifCreateRow" style="display:none;">
+          <div class="form-group"><label>Message</label><input id="notifText" placeholder="Notification text" style="min-width:300px;" /></div>
+          <button class="btn btn-primary" onclick="createNotification()">Send</button>
+        </div>
+        <div id="notificationsTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Audit Logs Section ═══ -->
+    <div id="sec-audit" class="section">
+      <div class="card">
+        <h2>Audit Logs <button class="refresh-btn" onclick="loadAuditLogs()">&#x21bb; Refresh</button></h2>
+        <div class="form-row">
+          <div class="form-group"><label>Event Type</label>
+            <select id="auditType"><option value="">All</option>
+              <option>call-initiated</option><option>call-accepted</option><option>call-rejected</option>
+              <option>call-ended</option><option>call-unanswered</option><option>door-open</option>
+              <option>access-code-success</option><option>access-code-failure</option><option>watch-camera-started</option>
+            </select>
+          </div>
+          <button class="btn btn-outline" onclick="loadAuditLogs()">Filter</button>
+        </div>
+        <div id="auditTable"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Modal -->
+<div id="editModal" class="modal-overlay">
+  <div class="modal">
+    <h3 id="modalTitle">Edit</h3>
+    <div id="modalBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="modalSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Resident Assignment Modal -->
+<div id="assignModal" class="modal-overlay">
+  <div class="modal">
+    <h3 id="assignTitle">Assign</h3>
+    <div id="assignBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeAssignModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// Config & State
+// ═══════════════════════════════════════════════════════════
+const GOOGLE_CLIENT_ID = '1070504632843-t3ohfvsimcqsjspt31v8ajpvdffait6c.apps.googleusercontent.com';
+let idToken = null, userEmail = null, userName = null, userPicture = null;
+let assignedBuildings = [];
+let selectedBuildingId = null;
+
+// ═══════════════════════════════════════════════════════════
+// Google Auth
+// ═══════════════════════════════════════════════════════════
+window.onload = function() {
+  google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredentialResponse });
+  google.accounts.id.renderButton(document.getElementById('googleSignInBtn'), { theme: 'outline', size: 'large' });
+};
+
+function handleCredentialResponse(response) {
+  idToken = response.credential;
+  const payload = JSON.parse(atob(idToken.split('.')[1]));
+  userEmail = payload.email;
+  userName = payload.name;
+  userPicture = payload.picture;
+  testManagementAccess();
+}
+
+async function testManagementAccess() {
+  const res = await apiCall('/api/management/buildings');
+  if (res === null) {
+    showAccessDenied();
+    return;
+  }
+  assignedBuildings = res;
+  showManagementUI();
+  populateBuildingSelect();
+  if (assignedBuildings.length > 0) {
+    selectedBuildingId = assignedBuildings[0].id;
+    document.getElementById('buildingSelect').value = selectedBuildingId;
+    onBuildingChange();
+  }
+}
+
+function handleSignOut() {
+  google.accounts.id.disableAutoSelect();
+  idToken = null; userEmail = null;
+  showLoginPrompt();
+}
+
+function showLoginPrompt() {
+  document.getElementById('loginPrompt').style.display = '';
+  document.getElementById('accessDenied').style.display = 'none';
+  document.getElementById('mgmtContent').style.display = 'none';
+  document.getElementById('authArea').innerHTML = '<div id="googleSignInBtn"></div>';
+  google.accounts.id.renderButton(document.getElementById('googleSignInBtn'), { theme: 'outline', size: 'large' });
+}
+
+function showAccessDenied() {
+  document.getElementById('loginPrompt').style.display = 'none';
+  document.getElementById('accessDenied').style.display = '';
+  document.getElementById('mgmtContent').style.display = 'none';
+  document.getElementById('authArea').innerHTML = `<div class="user-info"><span>${esc(userEmail)}</span><button id="signOutBtn" onclick="handleSignOut()">Sign Out</button></div>`;
+}
+
+function showManagementUI() {
+  document.getElementById('loginPrompt').style.display = 'none';
+  document.getElementById('accessDenied').style.display = 'none';
+  document.getElementById('mgmtContent').style.display = '';
+  document.getElementById('authArea').innerHTML = `<div class="user-info">${userPicture ? `<img src="${esc(userPicture)}" alt="" />` : ''}<span>${esc(userName || userEmail)}</span><button id="signOutBtn" onclick="handleSignOut()">Sign Out</button></div>`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Navigation
+// ═══════════════════════════════════════════════════════════
+function showSection(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('sec-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════════
+// Building Selector
+// ═══════════════════════════════════════════════════════════
+function populateBuildingSelect() {
+  const sel = document.getElementById('buildingSelect');
+  sel.innerHTML = '<option value="">All Buildings</option>';
+  for (const b of assignedBuildings) {
+    sel.innerHTML += `<option value="${b.id}">${esc(b.name)}</option>`;
+  }
+}
+
+function onBuildingChange() {
+  selectedBuildingId = document.getElementById('buildingSelect').value || null;
+  const hasBuilding = !!selectedBuildingId;
+
+  // Show/hide create forms based on building selection
+  document.getElementById('aptCreateRow').style.display = hasBuilding ? 'flex' : 'none';
+  document.getElementById('devCreateRow').style.display = hasBuilding ? 'flex' : 'none';
+  document.getElementById('notifCreateRow').style.display = hasBuilding ? 'flex' : 'none';
+
+  loadBuildingSettings();
+  loadApartments();
+  loadDevices();
+  loadNotifications();
+  loadAuditLogs();
+}
+
+// ═══════════════════════════════════════════════════════════
+// API Helper
+// ═══════════════════════════════════════════════════════════
+async function apiCall(url, options = {}) {
+  const headers = { 'Authorization': `Bearer ${idToken}`, ...options.headers };
+  try {
+    const res = await fetch(url, { ...options, headers });
+    if (res.status === 401) { handleSignOut(); return null; }
+    const data = await res.json();
+    if (data.error) { alert('Error: ' + data.error); return null; }
+    return data;
+  } catch (err) {
+    console.error('API error:', err);
+    return null;
+  }
+}
+
+async function apiPost(url, body) {
+  return apiCall(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+async function apiPut(url, body) {
+  return apiCall(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+async function apiDelete(url) {
+  return apiCall(url, { method: 'DELETE' });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Building Settings
+// ═══════════════════════════════════════════════════════════
+function loadBuildingSettings() {
+  const container = document.getElementById('buildingSettingsContent');
+  if (!selectedBuildingId) {
+    container.innerHTML = '<div class="empty-state">Select a building to view settings.</div>';
+    return;
+  }
+  const b = assignedBuildings.find(x => x.id === selectedBuildingId);
+  if (!b) { container.innerHTML = '<div class="empty-state">Building not found.</div>'; return; }
+
+  container.innerHTML = `
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+      <div><strong>Name:</strong> ${esc(b.name)}</div>
+      <div><strong>Address:</strong> ${esc(b.address)}</div>
+    </div>
+    <hr style="margin:16px 0; border:none; border-top:1px solid #dfe6e9;" />
+    <div class="form-row">
+      <div class="form-group"><label>Door Code</label><input id="bs-code" value="${esc(b.door_code)}" /></div>
+      <div class="form-group"><label>Door Opening Time (s)</label><input type="number" id="bs-doorTime" value="${b.door_opening_time}" /></div>
+      <div class="form-group"><label>No Answer Timeout (s)</label><input type="number" id="bs-timeout" value="${b.no_answer_timeout}" /></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Language</label><input id="bs-lang" value="${esc(b.language)}" /></div>
+      <div class="form-group"><label>Volume (0-100)</label><input type="number" id="bs-vol" value="${b.volume}" min="0" max="100" /></div>
+      <div class="form-group"><label>Brightness (0-100)</label><input type="number" id="bs-bright" value="${b.brightness}" min="0" max="100" /></div>
+    </div>
+    <button class="btn btn-primary" onclick="saveBuildingSettings()">Save Settings</button>
+  `;
+}
+
+async function saveBuildingSettings() {
+  if (!selectedBuildingId) return;
+  const r = await apiPut('/api/management/buildings/' + selectedBuildingId, {
+    door_code: document.getElementById('bs-code').value,
+    door_opening_time: parseInt(document.getElementById('bs-doorTime').value),
+    no_answer_timeout: parseInt(document.getElementById('bs-timeout').value),
+    language: document.getElementById('bs-lang').value,
+    volume: parseInt(document.getElementById('bs-vol').value),
+    brightness: parseInt(document.getElementById('bs-bright').value),
+  });
+  if (r) {
+    // Update cached building
+    const idx = assignedBuildings.findIndex(x => x.id === selectedBuildingId);
+    if (idx !== -1) assignedBuildings[idx] = r;
+    alert('Settings saved.');
+    loadBuildingSettings();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Apartments
+// ═══════════════════════════════════════════════════════════
+async function loadApartments() {
+  const container = document.getElementById('apartmentsTable');
+  if (!selectedBuildingId) {
+    container.innerHTML = '<div class="empty-state">Select a building to view apartments.</div>';
+    return;
+  }
+  const data = await apiCall('/api/management/buildings/' + selectedBuildingId + '/apartments');
+  if (!data) return;
+
+  if (data.length === 0) {
+    container.innerHTML = '<div class="empty-state">No apartments in this building.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Actions</th></tr></thead><tbody>';
+  for (const a of data) {
+    html += `<tr>
+      <td>${esc(a.number)}</td><td>${esc(a.name || '—')}</td>
+      <td><button class="btn btn-outline btn-small" onclick="showResidents('${a.id}','${esc(a.number)}')">Residents</button></td>
+      <td class="inline-actions">
+        <button class="btn btn-outline btn-small" onclick="editApartment('${a.id}','${esc(a.number)}','${esc(a.name || '')}')">Edit</button>
+        <button class="btn btn-danger btn-small" onclick="deleteApartment('${a.id}')">Delete</button>
+      </td></tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+async function createApartment() {
+  if (!selectedBuildingId) return;
+  const number = document.getElementById('aptNumber').value.trim();
+  const name = document.getElementById('aptName').value.trim();
+  if (!number) { alert('Apartment number is required.'); return; }
+  const r = await apiPost('/api/management/buildings/' + selectedBuildingId + '/apartments', { number, name });
+  if (r) { document.getElementById('aptNumber').value = ''; document.getElementById('aptName').value = ''; loadApartments(); }
+}
+
+function editApartment(id, number, name) {
+  openModal('Edit Apartment', `
+    <div class="form-group"><label>Number</label><input id="m-aNum" value="${esc(number)}" /></div>
+    <div class="form-group"><label>Name</label><input id="m-aName" value="${esc(name)}" /></div>
+  `, async () => {
+    const r = await apiPut('/api/management/apartments/' + id, {
+      number: document.getElementById('m-aNum').value,
+      name: document.getElementById('m-aName').value || null,
+    });
+    if (r) { closeModal(); loadApartments(); }
+  });
+}
+
+async function deleteApartment(id) {
+  if (!confirm('Delete this apartment?')) return;
+  await apiDelete('/api/management/apartments/' + id);
+  loadApartments();
+}
+
+// ═══════════════════════════════════════════════════════════
+// Residents
+// ═══════════════════════════════════════════════════════════
+async function showResidents(aptId, aptNumber) {
+  const residents = await apiCall('/api/management/apartments/' + aptId + '/residents');
+  let html = `<p style="margin-bottom:12px;">Residents in apartment <strong>${esc(aptNumber)}</strong>:</p>`;
+  if (residents && residents.length > 0) {
+    html += '<table><thead><tr><th>Name</th><th>Email</th><th>Action</th></tr></thead><tbody>';
+    for (const r of residents) {
+      html += `<tr><td>${esc(r.name)}</td><td>${esc(r.email)}</td><td><button class="btn btn-danger btn-small" onclick="removeResident('${aptId}','${r.id}','${esc(aptNumber)}')">Remove</button></td></tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty-state">No residents assigned.</div>';
+  }
+  html += `<div class="form-row" style="margin-top:16px;">
+    <div class="form-group"><label>User ID (email-based lookup coming soon)</label><input id="addResId" placeholder="User UUID" /></div>
+    <button class="btn btn-success btn-small" onclick="assignResident('${aptId}','${esc(aptNumber)}')">Assign</button>
+  </div>`;
+  openAssignModal('Apartment Residents', html);
+}
+
+async function assignResident(aptId, aptNumber) {
+  const userId = document.getElementById('addResId').value.trim();
+  if (!userId) return;
+  await apiPost('/api/management/apartments/' + aptId + '/residents', { user_id: userId });
+  showResidents(aptId, aptNumber);
+}
+
+async function removeResident(aptId, userId, aptNumber) {
+  if (!confirm('Remove this resident?')) return;
+  await apiDelete('/api/management/apartments/' + aptId + '/residents/' + userId);
+  showResidents(aptId, aptNumber);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Intercoms (Devices)
+// ═══════════════════════════════════════════════════════════
+async function loadDevices() {
+  const container = document.getElementById('devicesTable');
+  const data = await apiCall('/api/management/devices');
+  if (!data) return;
+
+  // Filter by selected building if one is selected
+  const filtered = selectedBuildingId ? data.filter(d => d.building_id === selectedBuildingId) : data;
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="empty-state">No intercoms.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+  for (const d of filtered) {
+    html += `<tr>
+      <td>${esc(d.name)}</td><td>${esc(d.building_name)}</td><td>${esc(d.gate_id || '—')}</td>
+      <td><span class="status-badge status-${d.status}">${d.status}</span></td>
+      <td><button class="btn btn-danger btn-small" onclick="revokeDevice('${d.id}')">Revoke</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+async function createDevice() {
+  if (!selectedBuildingId) return;
+  const name = document.getElementById('devName').value.trim();
+  const gate_id = document.getElementById('devGate').value.trim();
+  if (!name) { alert('Name is required.'); return; }
+  const r = await apiPost('/api/management/devices', { building_id: selectedBuildingId, name, gate_id });
+  if (r) {
+    const box = document.getElementById('devResult');
+    box.className = 'result-box success';
+    box.innerHTML = `Intercom created! Provisioning code: <span class="code-display">${esc(r.provisioning_code)}</span>`;
+    document.getElementById('devName').value = '';
+    document.getElementById('devGate').value = '';
+    loadDevices();
+  }
+}
+
+async function revokeDevice(id) {
+  if (!confirm('Revoke this intercom?')) return;
+  await apiPost('/api/management/devices/' + id + '/revoke', {});
+  loadDevices();
+}
+
+// ═══════════════════════════════════════════════════════════
+// Notifications
+// ═══════════════════════════════════════════════════════════
+async function loadNotifications() {
+  const container = document.getElementById('notificationsTable');
+  const data = await apiCall('/api/management/notifications');
+  if (!data) return;
+
+  const filtered = selectedBuildingId ? data.filter(n => n.building_id === selectedBuildingId) : data;
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="empty-state">No notifications.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Building</th><th>Message</th><th>Date</th><th>Action</th></tr></thead><tbody>';
+  for (const n of filtered) {
+    html += `<tr>
+      <td>${esc(n.building_name)}</td><td>${esc(n.text)}</td><td>${fmtDate(n.created_at)}</td>
+      <td><button class="btn btn-danger btn-small" onclick="deleteNotification('${n.id}')">Delete</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+async function createNotification() {
+  if (!selectedBuildingId) return;
+  const text = document.getElementById('notifText').value.trim();
+  if (!text) { alert('Message is required.'); return; }
+  const r = await apiPost('/api/management/notifications', { building_id: selectedBuildingId, text });
+  if (r) { document.getElementById('notifText').value = ''; loadNotifications(); }
+}
+
+async function deleteNotification(id) {
+  if (!confirm('Delete this notification?')) return;
+  await apiDelete('/api/management/notifications/' + id);
+  loadNotifications();
+}
+
+// ═══════════════════════════════════════════════════════════
+// Audit Logs
+// ═══════════════════════════════════════════════════════════
+async function loadAuditLogs() {
+  const container = document.getElementById('auditTable');
+  const params = new URLSearchParams();
+  const type = document.getElementById('auditType').value;
+  if (type) params.set('event_type', type);
+  if (selectedBuildingId) params.set('building_id', selectedBuildingId);
+  const qs = params.toString();
+
+  const data = await apiCall('/api/management/audit-logs' + (qs ? '?' + qs : ''));
+  if (!data) return;
+
+  if (data.length === 0) {
+    container.innerHTML = '<div class="empty-state">No audit logs found.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Time</th><th>Event</th><th>Building</th><th>User</th><th>Intercom</th><th>Description</th></tr></thead><tbody>';
+  for (const l of data) {
+    html += `<tr>
+      <td style="white-space:nowrap;">${fmtDateTime(l.created_at)}</td>
+      <td><span class="status-badge">${esc(l.event_type)}</span></td>
+      <td>${esc(l.building_name || '—')}</td>
+      <td>${esc(l.user_name || '—')}</td>
+      <td>${esc(l.intercom_name || '—')}</td>
+      <td>${esc(l.description || '—')}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Modal helpers
+// ═══════════════════════════════════════════════════════════
+function openModal(title, bodyHtml, onSave) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = bodyHtml;
+  document.getElementById('modalSave').onclick = onSave;
+  document.getElementById('editModal').classList.add('active');
+}
+function closeModal() { document.getElementById('editModal').classList.remove('active'); }
+
+function openAssignModal(title, bodyHtml) {
+  document.getElementById('assignTitle').textContent = title;
+  document.getElementById('assignBody').innerHTML = bodyHtml;
+  document.getElementById('assignModal').classList.add('active');
+}
+function closeAssignModal() { document.getElementById('assignModal').classList.remove('active'); }
+
+document.getElementById('editModal').addEventListener('click', e => { if (e.target === document.getElementById('editModal')) closeModal(); });
+document.getElementById('assignModal').addEventListener('click', e => { if (e.target === document.getElementById('assignModal')) closeAssignModal(); });
+
+// ═══════════════════════════════════════════════════════════
+// Utilities
+// ═══════════════════════════════════════════════════════════
+function esc(str) {
+  if (str == null) return '';
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+function fmtDate(iso) { return iso ? new Date(iso).toLocaleDateString() : '—'; }
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+</script>
+</body>
+</html>
