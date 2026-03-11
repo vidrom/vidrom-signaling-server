@@ -518,7 +518,10 @@ async function loadDevices() {
     html += `<tr>
       <td>${esc(d.name)}</td><td>${esc(d.building_name)}</td><td>${esc(d.gate_id || '—')}</td>
       <td><span class="status-badge status-${d.status}">${d.status}</span></td>
-      <td><button class="btn btn-danger btn-small" onclick="revokeDevice('${d.id}')">Revoke</button></td>
+      <td>
+        <button class="btn btn-danger btn-small" onclick="revokeDevice('${d.id}')">Revoke</button>
+        <button class="btn btn-outline btn-small" onclick="reprovisionDevice('${d.id}')">Re-provision</button>
+      </td>
     </tr>`;
   }
   html += '</tbody></table>';
@@ -545,6 +548,17 @@ async function revokeDevice(id) {
   if (!confirm('Revoke this intercom?')) return;
   await apiPost('/api/management/devices/' + id + '/revoke', {});
   loadDevices();
+}
+
+async function reprovisionDevice(id) {
+  if (!confirm('Re-provision this intercom? It will need to be set up again with a new code.')) return;
+  const r = await apiPost('/api/management/devices/' + id + '/reprovision', {});
+  if (r && r.provisioning_code) {
+    const box = document.getElementById('devResult');
+    box.className = 'result-box success';
+    box.innerHTML = `New provisioning code: <span class="code-display">${esc(r.provisioning_code)}</span>`;
+    loadDevices();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════

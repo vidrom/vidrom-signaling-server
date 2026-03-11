@@ -197,6 +197,19 @@ async function revokeDevice(buildingIds, id) {
   return { success: true };
 }
 
+async function reprovisionDevice(buildingIds, id) {
+  const devResult = await query('SELECT building_id FROM intercoms WHERE id = $1', [id]);
+  if (devResult.rows.length === 0) return { error: 'Intercom not found', status: 404 };
+  const err = assertBuilding(buildingIds, devResult.rows[0].building_id);
+  if (err) return err;
+  const provisioningCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const result = await query(
+    "UPDATE intercoms SET provisioning_status = 'pending', provisioning_code = $1 WHERE id = $2 RETURNING *",
+    [provisioningCode, id]
+  );
+  return { ...result.rows[0], provisioning_code: provisioningCode };
+}
+
 // ═══════════════════════════════════════════════════════════
 // Notifications
 // ═══════════════════════════════════════════════════════════
@@ -278,7 +291,7 @@ module.exports = {
   listBuildings, updateBuilding,
   listApartments, createApartment, updateApartment, deleteApartment,
   listResidents, assignResident, removeResident,
-  listDevices, createDevice, revokeDevice,
+  listDevices, createDevice, revokeDevice, reprovisionDevice,
   listNotifications, createNotification, deleteNotification,
   listAuditLogs,
 };

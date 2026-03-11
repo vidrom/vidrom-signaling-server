@@ -279,6 +279,16 @@ async function revokeDevice(id) {
   return { success: true };
 }
 
+async function reprovisionDevice(id) {
+  const provisioningCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const result = await query(
+    "UPDATE intercoms SET provisioning_status = 'pending', provisioning_code = $1 WHERE id = $2 RETURNING *",
+    [provisioningCode, id]
+  );
+  if (result.rows.length === 0) return { error: 'Intercom not found', status: 404 };
+  return { ...result.rows[0], provisioning_code: provisioningCode };
+}
+
 // ═══════════════════════════════════════════════════════════
 // Notifications
 // ═══════════════════════════════════════════════════════════
@@ -381,7 +391,7 @@ module.exports = {
   listUsers, createUser, updateUser, deleteUser,
   assignManager, removeManager, listBuildingManagers,
   assignResident, removeResident, listApartmentResidents,
-  listDevices, createDevice, updateDevice, deleteDevice, revokeDevice,
+  listDevices, createDevice, updateDevice, deleteDevice, revokeDevice, reprovisionDevice,
   listNotifications, createNotification, deleteNotification,
   listAuditLogs,
   listSettings, updateSetting,

@@ -147,6 +147,10 @@ exports.handler = async (event) => {
       if (revokeMatch && method === 'POST') {
         return json(200, await adminRoutes.revokeDevice(revokeMatch[1]));
       }
+      const reprovisionMatch = path.match(/^\/api\/admin\/devices\/([^/]+)\/reprovision$/);
+      if (reprovisionMatch && method === 'POST') {
+        return json(200, await adminRoutes.reprovisionDevice(reprovisionMatch[1]));
+      }
 
       // --- Notifications ---
       if (method === 'GET' && path === '/api/admin/notifications') {
@@ -234,6 +238,10 @@ exports.handler = async (event) => {
       const revokeMatch = path.match(/^\/api\/management\/devices\/([^/]+)\/revoke$/);
       if (revokeMatch && method === 'POST') {
         return json(200, await managementRoutes.revokeDevice(buildingIds, revokeMatch[1]));
+      }
+      const reprovisionMatch = path.match(/^\/api\/management\/devices\/([^/]+)\/reprovision$/);
+      if (reprovisionMatch && method === 'POST') {
+        return json(200, await managementRoutes.reprovisionDevice(buildingIds, reprovisionMatch[1]));
       }
 
       // --- Notifications ---
