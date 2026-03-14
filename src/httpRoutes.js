@@ -2,7 +2,8 @@
 // Portal APIs (/api/admin/*, /api/management/*) have moved to Lambda (see ../lambda/)
 // Portal HTML (admin.html, management.html) served from S3+CloudFront (see ../portals/)
 const { generateDeviceToken } = require('./auth');
-const { clients, fcmTokens, voipTokens, clearPendingRing } = require('./connectionState');
+const { clients, fcmTokens, voipTokens, clearPendingRing, isPendingRing } = require('./connectionState');
+const { isAPNsReady } = require('./apnsService');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -91,6 +92,25 @@ async function handleRequest(req, res) {
       const token = generateDeviceToken(device.deviceId, device.buildingId);
       console.log(`[HTTP] Device provisioned: ${device.deviceId}`);
       json(res, { token, deviceId: device.deviceId, buildingId: device.buildingId });
+    } else if (req.method === 'GET' && urlPath === '/debug/status') {
+      const status = {
+        clients: {
+          home: clients.home ? (clients.home.readyState === 1 ? 'connected' : 'stale') : null,
+          intercom: clients.intercom ? (clients.intercom.readyState === 1 ? 'connected' : 'stale') : null,
+        },
+        fcmTokens: {
+          home: fcmTokens.has('home') ? fcmTokens.get('home').substring(0, 20) + '...' : null,
+          intercom: fcmTokens.has('intercom') ? fcmTokens.get('intercom').substring(0, 20) + '...' : null,
+        },
+        voipTokens: {
+          home: voipTokens.has('home') ? voipTokens.get('home').substring(0, 20) + '...' : null,
+        },
+        apns: {
+          ready: isAPNsReady(),
+        },
+        pendingRing: isPendingRing(),
+      };
+      json(res, status);
     } else {
       res.writeHead(404);
       res.end();

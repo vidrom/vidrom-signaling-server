@@ -3,8 +3,9 @@ const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
 const { verifyToken } = require('./auth');
 const { getDevice } = require('./devices');
-const { clients, fcmTokens, setPendingRing, clearPendingRing, isPendingRing } = require('./connectionState');
+const { clients, fcmTokens, voipTokens, setPendingRing, clearPendingRing, isPendingRing } = require('./connectionState');
 const { query } = require('./db');
+const { sendVoipPush, isAPNsReady } = require('./apnsService');
 
 function handleConnection(ws) {
   const id = uuidv4();
@@ -84,7 +85,23 @@ function handleConnection(ws) {
           console.log(`[${id}] Home not connected via WS, pending ring set`);
         }
 
-        // Also send FCM push notification to home app
+        // Send VoIP push to iOS (Apple's recommended approach for incoming calls)
+        const homeVoipToken = voipTokens.get('home');
+        if (homeVoipToken && isAPNsReady()) {
+          sendVoipPush(homeVoipToken, 'Intercom')
+            .then((result) => {
+              if (result.success) {
+                console.log(`[${id}] VoIP push sent to home (iOS)`);
+              } else {
+                console.error(`[${id}] VoIP push failed: ${result.reason}`);
+              }
+            })
+            .catch((err) => console.error(`[${id}] VoIP push error:`, err.message));
+        } else if (homeVoipToken) {
+          console.log(`[${id}] VoIP token exists but APNs not configured — skipping VoIP push`);
+        }
+
+        // Send FCM push to Android
         const homeToken = fcmTokens.get('home');
         if (homeToken) {
           admin.messaging().send({
@@ -96,17 +113,8 @@ function handleConnection(ws) {
             android: {
               priority: 'high',
             },
-            apns: {
-              headers: { 'apns-priority': '10' },
-              payload: {
-                aps: {
-                  contentAvailable: true,
-                  sound: 'default',
-                },
-              },
-            },
           })
-            .then(() => console.log(`[${id}] FCM push sent to home`))
+            .then(() => console.log(`[${id}] FCM push sent to home (Android)`))
             .catch((err) => console.error(`[${id}] FCM push failed:`, err.message));
         } else {
           console.log(`[${id}] No FCM token for home, skipping push`);
