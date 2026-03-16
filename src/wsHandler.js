@@ -172,6 +172,22 @@ function handleConnection(ws) {
         break;
       }
 
+      case 'open-door': {
+        // Home tells intercom to open the door
+        if (clients.intercom && clients.intercom.readyState === 1) {
+          clients.intercom.send(JSON.stringify({ type: 'open-door' }));
+          console.log(`[${id}] Open-door relayed to intercom`);
+        }
+        // Also relay as hangup so both sides clean up
+        clearPendingRing();
+        const otherOD = role === 'intercom' ? clients.home : clients.intercom;
+        if (otherOD && otherOD.readyState === 1) {
+          otherOD.send(JSON.stringify({ type: 'hangup' }));
+          console.log(`[${id}] Hangup relayed (after open-door)`);
+        }
+        break;
+      }
+
       case 'hangup': {
         // Either side hangs up
         clearPendingRing();

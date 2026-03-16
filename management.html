@@ -373,7 +373,6 @@ function loadBuildingSettings() {
     </div>
     <hr style="margin:16px 0; border:none; border-top:1px solid #dfe6e9;" />
     <div class="form-row">
-      <div class="form-group"><label>Door Code</label><input id="bs-code" value="${esc(b.door_code)}" /></div>
       <div class="form-group"><label>Door Opening Time (s)</label><input type="number" id="bs-doorTime" value="${b.door_opening_time}" /></div>
       <div class="form-group"><label>No Answer Timeout (s)</label><input type="number" id="bs-timeout" value="${b.no_answer_timeout}" /></div>
     </div>
@@ -389,7 +388,6 @@ function loadBuildingSettings() {
 async function saveBuildingSettings() {
   if (!selectedBuildingId) return;
   const r = await apiPut('/api/management/buildings/' + selectedBuildingId, {
-    door_code: document.getElementById('bs-code').value,
     door_opening_time: parseInt(document.getElementById('bs-doorTime').value),
     no_answer_timeout: parseInt(document.getElementById('bs-timeout').value),
     language: document.getElementById('bs-lang').value,
@@ -513,10 +511,10 @@ async function loadDevices() {
     container.innerHTML = '<div class="empty-state">No intercoms.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Door Code</th><th>Status</th><th>Action</th></tr></thead><tbody>';
   for (const d of filtered) {
     html += `<tr>
-      <td>${esc(d.name)}</td><td>${esc(d.building_name)}</td><td>${esc(d.gate_id || '—')}</td>
+      <td>${esc(d.name)}</td><td>${esc(d.building_name)}</td><td>${esc(d.gate_id || '—')}</td><td><code>${esc(d.door_code || '—')}</code></td>
       <td><span class="status-badge status-${d.status}">${d.status}</span></td>
       <td>
         <button class="btn btn-danger btn-small" onclick="revokeDevice('${d.id}')">Revoke</button>

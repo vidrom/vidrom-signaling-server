@@ -26,7 +26,7 @@ async function updateBuilding(buildingIds, id, body) {
   const err = assertBuilding(buildingIds, id);
   if (err) return err;
   // Managers can only update settings, NOT name/address
-  const fields = ['door_code', 'door_opening_time', 'no_answer_timeout', 'language', 'volume', 'brightness', 'dark_mode', 'sleep_mode'];
+  const fields = ['door_opening_time', 'no_answer_timeout', 'language', 'volume', 'brightness', 'dark_mode', 'sleep_mode'];
   const sets = [];
   const values = [];
   let idx = 1;

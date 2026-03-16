@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS buildings (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL,
     address         VARCHAR(500) NOT NULL,
-    door_code       VARCHAR(20)  NOT NULL,
     door_opening_time INTEGER    NOT NULL DEFAULT 5,
     no_answer_timeout INTEGER    NOT NULL DEFAULT 30,
     language        VARCHAR(10)  NOT NULL DEFAULT 'en',
@@ -65,6 +64,7 @@ CREATE TABLE IF NOT EXISTS intercoms (
     status          VARCHAR(20)  NOT NULL DEFAULT 'disconnected' CHECK (status IN ('connected', 'disconnected')),
     provisioning_code   VARCHAR(10),
     provisioning_status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (provisioning_status IN ('pending', 'active', 'revoked')),
+    door_code       VARCHAR(20),
     is_door_open    BOOLEAN      NOT NULL DEFAULT false,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()

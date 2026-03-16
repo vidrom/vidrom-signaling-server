@@ -11,20 +11,20 @@ async function listBuildings(req, res) {
 }
 
 async function createBuilding(body) {
-  const { name, address, door_code, door_opening_time, no_answer_timeout, language, volume, brightness, dark_mode, sleep_mode } = body;
-  if (!name || !address || !door_code) {
-    return { error: 'name, address, and door_code are required', status: 400 };
+  const { name, address, door_opening_time, no_answer_timeout, language, volume, brightness, dark_mode, sleep_mode } = body;
+  if (!name || !address) {
+    return { error: 'name and address are required', status: 400 };
   }
   const result = await query(
-    `INSERT INTO buildings (name, address, door_code, door_opening_time, no_answer_timeout, language, volume, brightness, dark_mode, sleep_mode)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-    [name, address, door_code, door_opening_time || 5, no_answer_timeout || 30, language || 'en', volume ?? 50, brightness ?? 50, dark_mode ?? false, sleep_mode ?? false]
+    `INSERT INTO buildings (name, address, door_opening_time, no_answer_timeout, language, volume, brightness, dark_mode, sleep_mode)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    [name, address, door_opening_time || 5, no_answer_timeout || 30, language || 'en', volume ?? 50, brightness ?? 50, dark_mode ?? false, sleep_mode ?? false]
   );
   return result.rows[0];
 }
 
 async function updateBuilding(id, body) {
-  const fields = ['name', 'address', 'door_code', 'door_opening_time', 'no_answer_timeout', 'language', 'volume', 'brightness', 'dark_mode', 'sleep_mode'];
+  const fields = ['name', 'address', 'door_opening_time', 'no_answer_timeout', 'language', 'volume', 'brightness', 'dark_mode', 'sleep_mode'];
   const sets = [];
   const values = [];
   let idx = 1;
@@ -232,19 +232,19 @@ async function listDevices() {
 }
 
 async function createDevice(body) {
-  const { building_id, name, gate_id } = body;
+  const { building_id, name, gate_id, door_code } = body;
   if (!building_id || !name) return { error: 'building_id and name are required', status: 400 };
   // Generate 6-digit provisioning code, stored in DB for persistent provisioning
   const provisioningCode = Math.floor(100000 + Math.random() * 900000).toString();
   const result = await query(
-    'INSERT INTO intercoms (building_id, name, gate_id, provisioning_code, provisioning_status) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [building_id, name, gate_id || null, provisioningCode, 'pending']
+    'INSERT INTO intercoms (building_id, name, gate_id, door_code, provisioning_code, provisioning_status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+    [building_id, name, gate_id || null, door_code || null, provisioningCode, 'pending']
   );
   return result.rows[0];
 }
 
 async function updateDevice(id, body) {
-  const fields = ['name', 'gate_id'];
+  const fields = ['name', 'gate_id', 'door_code'];
   const sets = [];
   const values = [];
   let idx = 1;

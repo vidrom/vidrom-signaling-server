@@ -1,9 +1,10 @@
 // HTTP route handler — EC2-resident endpoints only
 // Portal APIs (/api/admin/*, /api/management/*) have moved to Lambda (see ../lambda/)
 // Portal HTML (admin.html, management.html) served from S3+CloudFront (see ../portals/)
-const { generateDeviceToken } = require('./auth');
+const { generateDeviceToken, verifyToken } = require('./auth');
 const { clients, fcmTokens, voipTokens, clearPendingRing, isPendingRing } = require('./connectionState');
 const { isAPNsReady } = require('./apnsService');
+const { query } = require('./db');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -31,6 +32,17 @@ function json(res, data, statusCode = 200) {
   }
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+// Extract device identity from Authorization: Bearer <jwt>
+function authenticateDevice(req) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  try {
+    return verifyToken(auth.slice(7)); // { deviceId, buildingId, role }
+  } catch {
+    return null;
+  }
 }
 
 // Main HTTP request handler — only stateful endpoints that require in-memory connection state
@@ -111,6 +123,40 @@ async function handleRequest(req, res) {
         pendingRing: isPendingRing(),
       };
       json(res, status);
+    } else if (req.method === 'GET' && urlPath === '/api/intercom/building-info') {
+      const device = authenticateDevice(req);
+      if (!device) { json(res, { error: 'Unauthorized' }, 401); return; }
+      const result = await query(
+        `SELECT b.id, b.name, b.address FROM buildings b WHERE b.id = $1`,
+        [device.buildingId]
+      );
+      if (!result.rows[0]) { json(res, { error: 'Building not found' }, 404); return; }
+      json(res, result.rows[0]);
+
+    } else if (req.method === 'GET' && urlPath === '/api/intercom/apartments') {
+      const device = authenticateDevice(req);
+      if (!device) { json(res, { error: 'Unauthorized' }, 401); return; }
+      const result = await query(
+        `SELECT id, number, name FROM apartments WHERE building_id = $1 ORDER BY number`,
+        [device.buildingId]
+      );
+      json(res, result.rows);
+
+    } else if (req.method === 'POST' && urlPath === '/api/intercom/verify-door-code') {
+      const device = authenticateDevice(req);
+      if (!device) { json(res, { error: 'Unauthorized' }, 401); return; }
+      const body = await readBody(req);
+      const { code } = body;
+      if (!code) { json(res, { error: 'Code required' }, 400); return; }
+      const result = await query(
+        `SELECT door_code FROM intercoms WHERE id = $1`,
+        [device.deviceId]
+      );
+      const intercom = result.rows[0];
+      if (!intercom || !intercom.door_code) { json(res, { valid: false }, 200); return; }
+      const valid = intercom.door_code === code;
+      json(res, { valid, ...(valid ? {} : { expected: intercom.door_code }) });
+
     } else {
       res.writeHead(404);
       res.end();
