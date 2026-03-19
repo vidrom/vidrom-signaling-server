@@ -370,7 +370,7 @@ async function loadBuildings() {
     document.getElementById('buildingsTable').innerHTML = '<div class="empty-state">No buildings yet.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Apartments</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Managers</th><th>Actions</th></tr></thead><tbody>';
   for (const b of data) {
     html += `<tr>
       <td>${esc(b.name)}</td><td>${esc(b.address)}</td>
