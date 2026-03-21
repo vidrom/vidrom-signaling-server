@@ -169,6 +169,11 @@ exports.handler = async (event) => {
         return json(200, await adminRoutes.listAuditLogs(queryParams));
       }
 
+      // --- Client Errors ---
+      if (method === 'GET' && path === '/api/admin/client-errors') {
+        return json(200, await adminRoutes.listClientErrors(queryParams));
+      }
+
       // --- Global Settings ---
       if (method === 'GET' && path === '/api/admin/settings') {
         return json(200, await adminRoutes.listSettings());

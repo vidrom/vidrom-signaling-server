@@ -195,28 +195,8 @@ function handleConnection(ws) {
           console.error(`[${id}] Error querying device tokens:`, err.message);
         }
 
-        // 3. Fallback: also try legacy in-memory tokens (for backward compatibility)
-        const legacyVoip = voipTokens.get('home');
-        const legacyFcm = fcmTokens.get('home');
-        if (legacyVoip && isAPNsReady()) {
-          sendVoipPush(legacyVoip, 'Intercom')
-            .then((r) => r.success && console.log(`[${id}] VoIP push sent (legacy)`))
-            .catch(() => {});
-        }
-        if (legacyFcm) {
-          admin.messaging().send({
-            token: legacyFcm,
-            data: { type: 'incoming-call', callerName: 'Intercom' },
-            android: { priority: 'high' },
-          })
-            .then(() => console.log(`[${id}] FCM push sent (legacy)`))
-            .catch(() => {});
-        }
-        // Also send to legacy WS client
-        if (clients.home && clients.home.readyState === 1) {
-          clients.home.send(JSON.stringify({ type: 'ring' }));
-          console.log(`[${id}] Ring sent to legacy home client`);
-        }
+        // Legacy in-memory tokens and WS client are no longer used for ring routing.
+        // All notifications now go through the per-apartment device_tokens DB table above.
 
         break;
       }

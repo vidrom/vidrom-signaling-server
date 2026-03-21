@@ -179,6 +179,27 @@ async function handleRequest(req, res) {
       const token = generateDeviceToken(device.deviceId, device.buildingId);
       console.log(`[HTTP] Device provisioned: ${device.deviceId}`);
       json(res, { token, deviceId: device.deviceId, buildingId: device.buildingId });
+    } else if (req.method === 'POST' && urlPath === '/api/client-error') {
+      const body = await readBody(req);
+      const { app, error_type, message: errMsg, stack, context,
+              platform, os_version, app_version, device_model,
+              user_id, user_email, apartment_id, building_id, intercom_id } = body;
+      if (!app || !error_type || !errMsg) {
+        json(res, { error: 'app, error_type, and message are required' }, 400);
+        return;
+      }
+      await query(
+        `INSERT INTO client_errors (app, error_type, message, stack, context,
+           platform, os_version, app_version, device_model,
+           user_id, user_email, apartment_id, building_id, intercom_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [app, error_type, errMsg, stack || null, context ? JSON.stringify(context) : null,
+         platform || null, os_version || null, app_version || null, device_model || null,
+         user_id || null, user_email || null, apartment_id || null, building_id || null, intercom_id || null]
+      );
+      console.log(`[HTTP] Client error logged: app=${app} type=${error_type}`);
+      json(res, { ok: true });
+
     } else if (req.method === 'GET' && urlPath === '/debug/status') {
       // Collect all active calls across intercoms
       const calls = {};

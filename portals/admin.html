@@ -117,6 +117,7 @@
       <button class="nav-tab" onclick="showSection('devices')">Intercoms</button>
       <button class="nav-tab" onclick="showSection('notifications')">Notifications</button>
       <button class="nav-tab" onclick="showSection('audit')">Audit Logs</button>
+      <button class="nav-tab" onclick="showSection('errors')">Client Errors</button>
       <button class="nav-tab" onclick="showSection('settings')">Settings</button>
     </div>
 
@@ -208,6 +209,21 @@
           <button class="btn btn-outline" onclick="loadAuditLogs()">Filter</button>
         </div>
         <div id="auditTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Client Errors Section ═══ -->
+    <div id="sec-errors" class="section">
+      <div class="card">
+        <h2>Client Errors <button class="refresh-btn" onclick="loadClientErrors()">&#x21bb; Refresh</button></h2>
+        <div class="form-row">
+          <div class="form-group"><label>App</label>
+            <select id="errApp"><option value="">All</option><option value="home">Home</option><option value="intercom">Intercom</option></select>
+          </div>
+          <div class="form-group"><label>Building</label><select id="errBldg"><option value="">All</option></select></div>
+          <button class="btn btn-outline" onclick="loadClientErrors()">Filter</button>
+        </div>
+        <div id="errorsTable"></div>
       </div>
     </div>
 
@@ -354,6 +370,7 @@ async function loadAll() {
   loadDevices();
   loadNotifications();
   loadAuditLogs();
+  loadClientErrors();
   loadSettings();
 }
 
@@ -792,6 +809,63 @@ async function loadAuditLogs() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Client Errors
+// ═══════════════════════════════════════════════════════════
+async function loadClientErrors() {
+  const params = new URLSearchParams();
+  const app = document.getElementById('errApp').value;
+  const bldg = document.getElementById('errBldg').value;
+  if (app) params.set('app', app);
+  if (bldg) params.set('building_id', bldg);
+  const qs = params.toString();
+
+  const data = await apiCall('/api/admin/client-errors' + (qs ? '?' + qs : ''));
+  if (!data) return;
+
+  if (data.length === 0) {
+    document.getElementById('errorsTable').innerHTML = '<div class="empty-state">No client errors found.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Time</th><th>App</th><th>Type</th><th>Message</th><th>Platform</th><th>User / Device</th><th>Building</th></tr></thead><tbody>';
+  for (const e of data) {
+    const who = e.user_email || (e.intercom_id ? 'Intercom ' + e.intercom_id.slice(0,8) + '…' : '—');
+    const platform = [e.platform, e.os_version].filter(Boolean).join(' ') || '—';
+    const msgShort = esc(e.message).length > 120 ? esc(e.message).substring(0,120) + '…' : esc(e.message);
+    html += `<tr onclick="showErrorDetail('${e.id}')" style="cursor:pointer;">
+      <td style="white-space:nowrap;">${fmtDateTime(e.created_at)}</td>
+      <td><span class="status-badge" style="background:${e.app === 'home' ? '#74b9ff' : '#a29bfe'};color:#fff;">${esc(e.app)}</span></td>
+      <td>${esc(e.error_type)}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.message)}">${msgShort}</td>
+      <td>${platform}</td>
+      <td>${who}</td>
+      <td>${esc(e.building_name || '—')}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('errorsTable').innerHTML = html;
+
+  // Store data for detail view
+  window._clientErrors = data;
+}
+
+function showErrorDetail(id) {
+  const e = (window._clientErrors || []).find(x => x.id === id);
+  if (!e) return;
+  let detail = `<div class="form-group"><label>App</label><div>${esc(e.app)}</div></div>`;
+  detail += `<div class="form-group"><label>Error Type</label><div>${esc(e.error_type)}</div></div>`;
+  detail += `<div class="form-group"><label>Message</label><div style="word-break:break-all;">${esc(e.message)}</div></div>`;
+  if (e.stack) detail += `<div class="form-group"><label>Stack Trace</label><pre style="background:#f1f2f6;padding:8px;border-radius:4px;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap;">${esc(e.stack)}</pre></div>`;
+  if (e.context) detail += `<div class="form-group"><label>Context</label><pre style="background:#f1f2f6;padding:8px;border-radius:4px;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap;">${esc(JSON.stringify(e.context, null, 2))}</pre></div>`;
+  detail += `<div class="form-group"><label>Platform</label><div>${esc(e.platform || '—')} ${esc(e.os_version || '')}</div></div>`;
+  if (e.device_model) detail += `<div class="form-group"><label>Device Model</label><div>${esc(e.device_model)}</div></div>`;
+  if (e.user_email) detail += `<div class="form-group"><label>User</label><div>${esc(e.user_email)}</div></div>`;
+  if (e.building_name) detail += `<div class="form-group"><label>Building</label><div>${esc(e.building_name)}</div></div>`;
+  if (e.intercom_id) detail += `<div class="form-group"><label>Intercom ID</label><div>${esc(e.intercom_id)}</div></div>`;
+  detail += `<div class="form-group"><label>Time</label><div>${fmtDateTime(e.created_at)}</div></div>`;
+  openModal('Error Detail', detail, () => closeModal());
+}
+
+// ═══════════════════════════════════════════════════════════
 // Global Settings
 // ═══════════════════════════════════════════════════════════
 async function loadSettings() {
@@ -824,7 +898,7 @@ async function saveSetting(key) {
 // Building Select Dropdowns
 // ═══════════════════════════════════════════════════════════
 function populateBuildingSelects() {
-  const selectors = ['aptBldgSelect', 'devBldgSelect', 'notifBldgSelect', 'auditBldg'];
+  const selectors = ['aptBldgSelect', 'devBldgSelect', 'notifBldgSelect', 'auditBldg', 'errBldg'];
   for (const sid of selectors) {
     const sel = document.getElementById(sid);
     if (!sel) continue;

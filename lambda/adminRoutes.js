@@ -366,6 +366,36 @@ async function listAuditLogs(queryParams) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Client Errors
+// ═══════════════════════════════════════════════════════════
+
+async function listClientErrors(queryParams) {
+  const conditions = [];
+  const values = [];
+  let idx = 1;
+
+  if (queryParams.app) {
+    conditions.push(`ce.app = $${idx++}`);
+    values.push(queryParams.app);
+  }
+  if (queryParams.building_id) {
+    conditions.push(`ce.building_id = $${idx++}`);
+    values.push(queryParams.building_id);
+  }
+
+  const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+  const result = await query(
+    `SELECT ce.*, b.name as building_name
+     FROM client_errors ce
+     LEFT JOIN buildings b ON ce.building_id = b.id
+     ${where}
+     ORDER BY ce.created_at DESC LIMIT 200`,
+    values
+  );
+  return result.rows;
+}
+
+// ═══════════════════════════════════════════════════════════
 // Global Settings
 // ═══════════════════════════════════════════════════════════
 
@@ -394,5 +424,6 @@ module.exports = {
   listDevices, createDevice, updateDevice, deleteDevice, revokeDevice, reprovisionDevice,
   listNotifications, createNotification, deleteNotification,
   listAuditLogs,
+  listClientErrors,
   listSettings, updateSetting,
 };
