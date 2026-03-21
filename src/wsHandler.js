@@ -1,6 +1,9 @@
 // WebSocket connection handler — message routing and signaling logic
 //
-// Supports per-apartment notification routing and first-accept-wins:
+// Multi-tenant: supports multiple intercoms across buildings.
+// Each intercom has its own active-call slot (keyed by deviceId).
+// Home clients are resolved to their building's intercom via apartment → building lookup.
+//
 // - Intercom sends ring with apartmentId → all residents of that apartment are notified
 // - First resident to accept gets the call; others receive 'call-taken'
 // - WebRTC offer/answer/candidate flow between intercom ↔ accepted home client
@@ -10,8 +13,9 @@ const { verifyToken } = require('./auth');
 const { getDevice } = require('./devices');
 const {
   clients, fcmTokens, voipTokens,
+  addIntercom, removeIntercom, getIntercom, getIntercomForBuilding,
   addHomeClient, removeHomeClient, getHomeClients, sendToApartment,
-  activeCall, setPendingRing, clearPendingRing, isPendingRing,
+  activeCall, activeCalls, setPendingRing, clearPendingRing, isPendingRing, getPendingRing,
 } = require('./connectionState');
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
@@ -19,8 +23,10 @@ const { sendVoipPush, isAPNsReady } = require('./apnsService');
 function handleConnection(ws) {
   const id = uuidv4();
   let role = null;
-  let deviceId = null;
-  let apartmentId = null; // set when home client registers with an apartment
+  let deviceId = null;       // intercom deviceId (set on intercom register)
+  let buildingId = null;      // resolved for both roles
+  let apartmentId = null;     // set when home client registers with an apartment
+  let intercomDeviceId = null; // which intercom this home client routes to
 
   console.log(`[${id}] New connection`);
 
@@ -62,7 +68,11 @@ function handleConnection(ws) {
               return;
             }
             deviceId = decoded.deviceId;
-            console.log(`[${id}] Intercom authenticated: device=${decoded.deviceId}, building=${decoded.buildingId}`);
+            buildingId = decoded.buildingId;
+            console.log(`[${id}] Intercom authenticated: device=${deviceId}, building=${buildingId}`);
+            addIntercom(deviceId, buildingId, ws);
+            // Legacy fallback
+            clients.intercom = ws;
             await query("UPDATE intercoms SET status = 'connected' WHERE id = $1", [deviceId]);
           } catch (err) {
             console.error(`[${id}] Intercom rejected: invalid token — ${err.message}`);
@@ -70,15 +80,29 @@ function handleConnection(ws) {
             ws.close();
             return;
           }
-          clients.intercom = ws;
         }
 
         // Home clients register with their apartmentId
         if (role === 'home') {
           apartmentId = message.apartmentId || null;
           if (apartmentId) {
-            addHomeClient(apartmentId, id, ws);
-            console.log(`[${id}] Home registered for apartment=${apartmentId}`);
+            // Resolve apartment → building → intercom
+            try {
+              const bldgResult = await query(
+                'SELECT building_id FROM apartments WHERE id = $1', [apartmentId]
+              );
+              if (bldgResult.rows[0]) {
+                buildingId = bldgResult.rows[0].building_id;
+                const intercom = getIntercomForBuilding(buildingId);
+                if (intercom) {
+                  intercomDeviceId = intercom.deviceId;
+                }
+              }
+            } catch (err) {
+              console.error(`[${id}] Failed to resolve building for apartment=${apartmentId}:`, err.message);
+            }
+            addHomeClient(apartmentId, id, ws, buildingId);
+            console.log(`[${id}] Home registered for apartment=${apartmentId}, building=${buildingId}, intercom=${intercomDeviceId || 'none'}`);
           } else {
             // Legacy: no apartmentId — treat as single home client
             clients.home = ws;
@@ -104,12 +128,26 @@ function handleConnection(ws) {
           console.error(`[${id}] Ring without apartmentId`);
           break;
         }
+        if (!deviceId) {
+          console.error(`[${id}] Ring from non-intercom connection`);
+          break;
+        }
 
-        console.log(`[${id}] Ring for apartment=${targetApartmentId}`);
+        console.log(`[${id}] Ring for apartment=${targetApartmentId} from intercom=${deviceId}`);
+
+        // If a watch session is active on this intercom, end it first — calls take priority
+        const prevCall = activeCall.get(deviceId);
+        if (prevCall && prevCall.type === 'watch') {
+          if (prevCall.acceptedWs && prevCall.acceptedWs.readyState === 1) {
+            prevCall.acceptedWs.send(JSON.stringify({ type: 'watch-end' }));
+            console.log(`[${id}] Ended active watch session for incoming ring`);
+          }
+          activeCall.clear(deviceId);
+        }
 
         // Start tracking this call
-        activeCall.start(targetApartmentId);
-        setPendingRing(targetApartmentId);
+        activeCall.start(deviceId, targetApartmentId, 'call');
+        setPendingRing(targetApartmentId, deviceId);
 
         // 1. Send WS ring to all connected home clients for this apartment
         const wsSent = sendToApartment(targetApartmentId, { type: 'ring' });
@@ -185,26 +223,31 @@ function handleConnection(ws) {
 
       case 'accept': {
         // Home accepts the call — first-accept-wins
-        const call = activeCall.get();
+        // Resolve which intercom's call this home client is accepting
+        const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
+        const call = targetIntercom ? activeCall.get(targetIntercom) : null;
         if (!call) {
           ws.send(JSON.stringify({ type: 'error', message: 'No active call' }));
           break;
         }
 
-        const accepted = activeCall.accept(id, ws);
+        const accepted = activeCall.accept(targetIntercom, id, ws);
         if (accepted) {
+          // Update this home client's intercom target
+          intercomDeviceId = targetIntercom;
           // This resident won the race — relay accept to intercom
           clearPendingRing(call.apartmentId);
-          if (clients.intercom && clients.intercom.readyState === 1) {
-            clients.intercom.send(JSON.stringify({ type: 'accept' }));
-            console.log(`[${id}] Accept relayed to intercom (first-accept-wins)`);
+          const intercom = getIntercom(targetIntercom);
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'accept' }));
+            console.log(`[${id}] Accept relayed to intercom=${targetIntercom} (first-accept-wins)`);
           }
 
           // Notify ALL OTHER home clients for this apartment that the call was taken
           const aptClients = getHomeClients(call.apartmentId);
-          for (const [connId, clientWs] of aptClients) {
-            if (connId !== id && clientWs.readyState === 1) {
-              clientWs.send(JSON.stringify({ type: 'call-taken' }));
+          for (const [connId, entry] of aptClients) {
+            if (connId !== id && entry.ws.readyState === 1) {
+              entry.ws.send(JSON.stringify({ type: 'call-taken' }));
               console.log(`[${id}] Sent call-taken to ${connId}`);
             }
           }
@@ -222,11 +265,12 @@ function handleConnection(ws) {
 
       case 'decline': {
         // Individual resident declines — doesn't end the call for others
-        const call = activeCall.get();
+        const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
+        const call = targetIntercom ? activeCall.get(targetIntercom) : null;
         if (!call) break;
 
-        activeCall.decline(id);
-        console.log(`[${id}] Declined call (apartment=${call.apartmentId})`);
+        activeCall.decline(targetIntercom, id);
+        console.log(`[${id}] Declined call (apartment=${call.apartmentId}, intercom=${targetIntercom})`);
 
         // Check if ALL connected home clients for this apartment have declined
         const aptClients = getHomeClients(call.apartmentId);
@@ -241,10 +285,11 @@ function handleConnection(ws) {
         if (allDeclined && aptClients.size > 0) {
           // Everyone declined — relay to intercom
           clearPendingRing(call.apartmentId);
-          activeCall.clear();
-          if (clients.intercom && clients.intercom.readyState === 1) {
-            clients.intercom.send(JSON.stringify({ type: 'decline' }));
-            console.log(`[${id}] All residents declined — relayed to intercom`);
+          activeCall.clear(targetIntercom);
+          const intercom = getIntercom(targetIntercom);
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'decline' }));
+            console.log(`[${id}] All residents declined — relayed to intercom=${targetIntercom}`);
           }
         }
         break;
@@ -252,15 +297,20 @@ function handleConnection(ws) {
 
       case 'offer': {
         // WebRTC SDP offer — route based on role
-        const call = activeCall.get();
         if (role === 'home') {
-          // Home → Intercom
-          if (clients.intercom && clients.intercom.readyState === 1) {
+          // Home → Intercom (route to the correct intercom for this building)
+          const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'offer', sdp: message.sdp }));
+            console.log(`[${id}] Offer relayed to intercom=${intercomDeviceId}`);
+          } else if (clients.intercom && clients.intercom.readyState === 1) {
+            // Legacy fallback
             clients.intercom.send(JSON.stringify({ type: 'offer', sdp: message.sdp }));
-            console.log(`[${id}] Offer relayed to intercom`);
+            console.log(`[${id}] Offer relayed to intercom (legacy)`);
           }
         } else if (role === 'intercom') {
           // Intercom → accepted home client
+          const call = activeCall.get(deviceId);
           if (call && call.acceptedWs && call.acceptedWs.readyState === 1) {
             call.acceptedWs.send(JSON.stringify({ type: 'offer', sdp: message.sdp }));
             console.log(`[${id}] Offer relayed to accepted home`);
@@ -275,15 +325,19 @@ function handleConnection(ws) {
 
       case 'answer': {
         // WebRTC SDP answer — route based on role
-        const call = activeCall.get();
         if (role === 'home') {
           // Home → Intercom
-          if (clients.intercom && clients.intercom.readyState === 1) {
+          const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'answer', sdp: message.sdp }));
+            console.log(`[${id}] Answer relayed to intercom=${intercomDeviceId}`);
+          } else if (clients.intercom && clients.intercom.readyState === 1) {
             clients.intercom.send(JSON.stringify({ type: 'answer', sdp: message.sdp }));
-            console.log(`[${id}] Answer relayed to intercom`);
+            console.log(`[${id}] Answer relayed to intercom (legacy)`);
           }
         } else if (role === 'intercom') {
           // Intercom → accepted home client
+          const call = activeCall.get(deviceId);
           if (call && call.acceptedWs && call.acceptedWs.readyState === 1) {
             call.acceptedWs.send(JSON.stringify({ type: 'answer', sdp: message.sdp }));
             console.log(`[${id}] Answer relayed to accepted home`);
@@ -297,9 +351,9 @@ function handleConnection(ws) {
 
       case 'candidate': {
         // ICE candidate exchange (bidirectional)
-        const call = activeCall.get();
         if (role === 'intercom') {
           // Intercom → accepted home client
+          const call = activeCall.get(deviceId);
           if (call && call.acceptedWs && call.acceptedWs.readyState === 1) {
             call.acceptedWs.send(JSON.stringify({ type: 'candidate', candidate: message.candidate }));
           } else if (clients.home && clients.home.readyState === 1) {
@@ -307,7 +361,10 @@ function handleConnection(ws) {
           }
         } else {
           // Home → Intercom
-          if (clients.intercom && clients.intercom.readyState === 1) {
+          const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'candidate', candidate: message.candidate }));
+          } else if (clients.intercom && clients.intercom.readyState === 1) {
             clients.intercom.send(JSON.stringify({ type: 'candidate', candidate: message.candidate }));
           }
         }
@@ -317,25 +374,22 @@ function handleConnection(ws) {
 
       case 'open-door': {
         // Home tells intercom to open the door
-        if (clients.intercom && clients.intercom.readyState === 1) {
+        const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
+        if (intercom && intercom.ws.readyState === 1) {
+          intercom.ws.send(JSON.stringify({ type: 'open-door' }));
+          console.log(`[${id}] Open-door relayed to intercom=${intercomDeviceId}`);
+        } else if (clients.intercom && clients.intercom.readyState === 1) {
           clients.intercom.send(JSON.stringify({ type: 'open-door' }));
-          console.log(`[${id}] Open-door relayed to intercom`);
+          console.log(`[${id}] Open-door relayed to intercom (legacy)`);
         }
-        // Also relay as hangup so both sides clean up
-        const call = activeCall.get();
-        if (call) {
-          clearPendingRing(call.apartmentId);
-          activeCall.clear();
-        }
-        if (role === 'intercom') {
-          const call2 = activeCall.get();
-          if (call2 && call2.acceptedWs && call2.acceptedWs.readyState === 1) {
-            call2.acceptedWs.send(JSON.stringify({ type: 'hangup' }));
-          } else if (clients.home && clients.home.readyState === 1) {
-            clients.home.send(JSON.stringify({ type: 'hangup' }));
+        // Clear the active call
+        const targetIntercom = intercomDeviceId || deviceId;
+        if (targetIntercom) {
+          const call = activeCall.get(targetIntercom);
+          if (call) {
+            clearPendingRing(call.apartmentId);
+            activeCall.clear(targetIntercom);
           }
-        } else {
-          // Home sent open-door — hangup goes to intercom (already sent open-door above)
         }
         console.log(`[${id}] Hangup relayed (after open-door)`);
         break;
@@ -343,43 +397,73 @@ function handleConnection(ws) {
 
       case 'hangup': {
         // Either side hangs up
-        const call = activeCall.get();
-        if (call) {
-          clearPendingRing(call.apartmentId);
-          activeCall.clear();
-        }
         if (role === 'intercom') {
-          // Intercom hung up — notify the accepted home client + all ringing clients
-          if (call && call.acceptedWs && call.acceptedWs.readyState === 1) {
-            call.acceptedWs.send(JSON.stringify({ type: 'hangup' }));
-          }
+          const call = activeCall.get(deviceId);
           if (call) {
+            clearPendingRing(call.apartmentId);
+            // Notify the accepted home client + all ringing clients
+            if (call.acceptedWs && call.acceptedWs.readyState === 1) {
+              call.acceptedWs.send(JSON.stringify({ type: 'hangup' }));
+            }
             sendToApartment(call.apartmentId, { type: 'hangup' });
+            activeCall.clear(deviceId);
           }
           // Legacy fallback
           if (clients.home && clients.home.readyState === 1) {
             clients.home.send(JSON.stringify({ type: 'hangup' }));
           }
         } else {
-          // Home hung up — notify intercom
-          if (clients.intercom && clients.intercom.readyState === 1) {
+          // Home hung up — notify the correct intercom
+          const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
+          if (targetIntercom) {
+            const call = activeCall.get(targetIntercom);
+            if (call) {
+              clearPendingRing(call.apartmentId);
+              activeCall.clear(targetIntercom);
+            }
+            const intercom = getIntercom(targetIntercom);
+            if (intercom && intercom.ws.readyState === 1) {
+              intercom.ws.send(JSON.stringify({ type: 'hangup' }));
+              console.log(`[${id}] Hangup relayed to intercom=${targetIntercom}`);
+            }
+          } else if (clients.intercom && clients.intercom.readyState === 1) {
             clients.intercom.send(JSON.stringify({ type: 'hangup' }));
-            console.log(`[${id}] Hangup relayed to intercom`);
+            console.log(`[${id}] Hangup relayed to intercom (legacy)`);
           }
         }
         break;
       }
 
       case 'watch': {
-        // Home wants to view intercom camera
-        if (clients.intercom && clients.intercom.readyState === 1) {
-          // Track this as a call so offer/answer/candidate routes correctly
-          if (apartmentId) {
-            activeCall.start(apartmentId);
-            activeCall.accept(id, ws);
+        // Home wants to view intercom camera — route to their building's intercom
+        const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
+        const targetWs = intercom ? intercom.ws : clients.intercom;
+        const targetDeviceId = intercomDeviceId || deviceId;
+
+        if (targetWs && targetWs.readyState === 1) {
+          const call = targetDeviceId ? activeCall.get(targetDeviceId) : null;
+
+          // Don't allow watch during an active call
+          if (call && call.type === 'call') {
+            ws.send(JSON.stringify({ type: 'error', message: 'Intercom is busy on a call' }));
+            console.log(`[${id}] Watch rejected — active call in progress on intercom=${targetDeviceId}`);
+            break;
           }
-          clients.intercom.send(JSON.stringify({ type: 'watch' }));
-          console.log(`[${id}] Watch request relayed to intercom`);
+
+          // If someone else is already watching this intercom, end their session
+          if (call && call.type === 'watch' && call.acceptedWs && call.acceptedWs.readyState === 1) {
+            call.acceptedWs.send(JSON.stringify({ type: 'watch-end' }));
+            console.log(`[${id}] Displaced previous watcher on intercom=${targetDeviceId}`);
+            targetWs.send(JSON.stringify({ type: 'watch-end' }));
+          }
+
+          // Track this as a watch so offer/answer/candidate routes correctly
+          if (targetDeviceId && apartmentId) {
+            activeCall.start(targetDeviceId, apartmentId, 'watch');
+            activeCall.accept(targetDeviceId, id, ws);
+          }
+          targetWs.send(JSON.stringify({ type: 'watch' }));
+          console.log(`[${id}] Watch request relayed to intercom=${targetDeviceId}`);
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Intercom not connected' }));
         }
@@ -387,17 +471,25 @@ function handleConnection(ws) {
       }
 
       case 'watch-end': {
-        const call = activeCall.get();
-        if (call) activeCall.clear();
+        const targetIntercom = role === 'intercom' ? deviceId
+          : (intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null));
+        const call = targetIntercom ? activeCall.get(targetIntercom) : null;
+
+        // Only clear if this is a watch session (don't accidentally clear an active call)
+        if (call && call.type === 'watch') activeCall.clear(targetIntercom);
+
         if (role === 'home') {
-          if (clients.intercom && clients.intercom.readyState === 1) {
+          const intercom = targetIntercom ? getIntercom(targetIntercom) : null;
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'watch-end' }));
+            console.log(`[${id}] Watch-end relayed to intercom=${targetIntercom}`);
+          } else if (clients.intercom && clients.intercom.readyState === 1) {
             clients.intercom.send(JSON.stringify({ type: 'watch-end' }));
-            console.log(`[${id}] Watch-end relayed to intercom`);
+            console.log(`[${id}] Watch-end relayed to intercom (legacy)`);
           }
         } else {
-          const call2 = activeCall.get();
-          if (call2 && call2.acceptedWs && call2.acceptedWs.readyState === 1) {
-            call2.acceptedWs.send(JSON.stringify({ type: 'watch-end' }));
+          if (call && call.acceptedWs && call.acceptedWs.readyState === 1) {
+            call.acceptedWs.send(JSON.stringify({ type: 'watch-end' }));
           } else if (clients.home && clients.home.readyState === 1) {
             clients.home.send(JSON.stringify({ type: 'watch-end' }));
           }
@@ -433,19 +525,20 @@ function handleConnection(ws) {
     console.log(`[${id}] Disconnected (role: ${role})`);
 
     if (role === 'intercom') {
-      if (clients.intercom === ws) clients.intercom = null;
-      const call = activeCall.get();
-      if (call) {
-        clearPendingRing(call.apartmentId);
-        // Notify all connected home clients for the call's apartment
-        sendToApartment(call.apartmentId, { type: 'peer-disconnected', role: 'intercom' });
-        activeCall.clear();
-      }
       if (deviceId) {
+        // Notify home clients for any active call on this intercom
+        const call = activeCall.get(deviceId);
+        if (call) {
+          clearPendingRing(call.apartmentId);
+          sendToApartment(call.apartmentId, { type: 'peer-disconnected', role: 'intercom' });
+          activeCall.clear(deviceId);
+        }
+        removeIntercom(deviceId);
         query("UPDATE intercoms SET status = 'disconnected' WHERE id = $1", [deviceId])
           .catch(err => console.error(`[${id}] Failed to update intercom status:`, err.message));
       }
       // Legacy fallback
+      if (clients.intercom === ws) clients.intercom = null;
       if (clients.home && clients.home.readyState === 1) {
         clients.home.send(JSON.stringify({ type: 'peer-disconnected', role: 'intercom' }));
       }
@@ -458,16 +551,20 @@ function handleConnection(ws) {
       if (clients.home === ws) {
         clients.home = null;
       }
-      const call = activeCall.get();
+      // Find if this home client was part of an active call
+      const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
+      const call = targetIntercom ? activeCall.get(targetIntercom) : null;
+
       if (call && call.acceptedBy === id) {
         // Accepted client disconnected — notify intercom
-        activeCall.clear();
-        if (clients.intercom && clients.intercom.readyState === 1) {
-          clients.intercom.send(JSON.stringify({ type: 'peer-disconnected', role: 'home' }));
+        activeCall.clear(targetIntercom);
+        const intercom = getIntercom(targetIntercom);
+        if (intercom && intercom.ws.readyState === 1) {
+          intercom.ws.send(JSON.stringify({ type: 'peer-disconnected', role: 'home' }));
         }
       } else if (call && call.apartmentId === apartmentId && !call.acceptedBy) {
         // Ringing client disconnected — treat as implicit decline
-        activeCall.decline(id);
+        activeCall.decline(targetIntercom, id);
         const aptClients = getHomeClients(call.apartmentId);
         let allDeclined = true;
         for (const [connId] of aptClients) {
@@ -478,10 +575,11 @@ function handleConnection(ws) {
         }
         if (allDeclined) {
           clearPendingRing(call.apartmentId);
-          activeCall.clear();
-          if (clients.intercom && clients.intercom.readyState === 1) {
-            clients.intercom.send(JSON.stringify({ type: 'decline' }));
-            console.log(`[${id}] All residents declined/disconnected — relayed to intercom`);
+          activeCall.clear(targetIntercom);
+          const intercom = getIntercom(targetIntercom);
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'decline' }));
+            console.log(`[${id}] All residents declined/disconnected — relayed to intercom=${targetIntercom}`);
           }
         }
       }

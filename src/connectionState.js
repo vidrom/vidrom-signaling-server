@@ -1,24 +1,51 @@
 // Shared mutable state for connected clients, push tokens, and active calls
 //
-// Supports multiple home clients per apartment (up to 10 residents).
+// Multi-tenant: supports multiple intercoms (one per building/device) and
+// multiple home clients per apartment. Each intercom has its own active-call
+// slot so buildings operate independently.
+//
 // When an intercom rings an apartment, ALL residents are notified.
 // The first resident to accept gets the call (first-accept-wins).
 
-// ---- Intercom client (one per server instance) ----
-// clients.home is kept for legacy backward compatibility (single home client without apartmentId)
+// ---- Intercom clients: deviceId → { ws, buildingId } ----
+const intercoms = new Map();
+
+function addIntercom(deviceId, buildingId, ws) {
+  intercoms.set(deviceId, { ws, buildingId });
+}
+
+function removeIntercom(deviceId) {
+  intercoms.delete(deviceId);
+}
+
+function getIntercom(deviceId) {
+  return intercoms.get(deviceId) || null;
+}
+
+// Look up the intercom WebSocket for a given building
+function getIntercomForBuilding(buildingId) {
+  for (const [deviceId, entry] of intercoms) {
+    if (entry.buildingId === buildingId && entry.ws.readyState === 1) {
+      return { deviceId, ...entry };
+    }
+  }
+  return null;
+}
+
+// Legacy single-client fallback (kept for backward compat during transition)
 const clients = {
   intercom: null,
   home: null,
 };
 
-// ---- Home clients: apartmentId → Map<connectionId, WebSocket> ----
+// ---- Home clients: apartmentId → Map<connectionId, { ws, buildingId }> ----
 const homeClients = new Map();
 
-function addHomeClient(apartmentId, connId, ws) {
+function addHomeClient(apartmentId, connId, ws, buildingId) {
   if (!homeClients.has(apartmentId)) {
     homeClients.set(apartmentId, new Map());
   }
-  homeClients.get(apartmentId).set(connId, ws);
+  homeClients.get(apartmentId).set(connId, { ws, buildingId });
 }
 
 function removeHomeClient(apartmentId, connId) {
@@ -39,69 +66,83 @@ function sendToApartment(apartmentId, message) {
   const apt = homeClients.get(apartmentId);
   if (!apt) return 0;
   let sent = 0;
-  for (const [, ws] of apt) {
-    if (ws.readyState === 1) {
-      ws.send(msg);
+  for (const [, entry] of apt) {
+    if (entry.ws.readyState === 1) {
+      entry.ws.send(msg);
       sent++;
     }
   }
   return sent;
 }
 
-// ---- Active call state (one active call at a time per server) ----
-let activeCall = null;
-// Shape: { apartmentId, acceptedBy: connId, acceptedWs: WebSocket, declinedBy: Set<connId> }
+// ---- Active call state: one active call per intercom (deviceId) ----
+// activeCalls: deviceId → { apartmentId, type, acceptedBy, acceptedWs, declinedBy }
+const activeCalls = new Map();
 
-function startCall(apartmentId) {
-  activeCall = {
+function startCall(intercomDeviceId, apartmentId, type = 'call') {
+  activeCalls.set(intercomDeviceId, {
     apartmentId,
+    type,
     acceptedBy: null,
     acceptedWs: null,
     declinedBy: new Set(),
-  };
+  });
 }
 
-function getActiveCall() {
-  return activeCall;
+function getActiveCall(intercomDeviceId) {
+  return activeCalls.get(intercomDeviceId) || null;
 }
 
-function acceptCall(connId, ws) {
-  if (!activeCall) return false;
-  if (activeCall.acceptedBy) return false; // already accepted by someone else
-  activeCall.acceptedBy = connId;
-  activeCall.acceptedWs = ws;
+// Find the active call for a given apartment (needed for home→intercom routing)
+function getActiveCallByApartment(apartmentId) {
+  for (const [intercomDeviceId, call] of activeCalls) {
+    if (call.apartmentId === apartmentId) {
+      return { intercomDeviceId, ...call };
+    }
+  }
+  return null;
+}
+
+function acceptCall(intercomDeviceId, connId, ws) {
+  const call = activeCalls.get(intercomDeviceId);
+  if (!call) return false;
+  if (call.acceptedBy) return false; // already accepted by someone else
+  call.acceptedBy = connId;
+  call.acceptedWs = ws;
   return true;
 }
 
-function declineCall(connId) {
-  if (!activeCall) return;
-  activeCall.declinedBy.add(connId);
+function declineCall(intercomDeviceId, connId) {
+  const call = activeCalls.get(intercomDeviceId);
+  if (!call) return;
+  call.declinedBy.add(connId);
 }
 
-function clearCall() {
-  activeCall = null;
+function clearCall(intercomDeviceId) {
+  activeCalls.delete(intercomDeviceId);
 }
 
 // ---- Per-apartment pending ring (survives WS reconnection) ----
-const pendingRings = new Map(); // apartmentId → timeout
+const pendingRings = new Map(); // apartmentId → { timeout, intercomDeviceId }
 
-function setPendingRing(apartmentId) {
+function setPendingRing(apartmentId, intercomDeviceId) {
   clearPendingRing(apartmentId);
   const timeout = setTimeout(() => {
     console.log(`[PENDING] Ring expired for apartment ${apartmentId} after 30s`);
     pendingRings.delete(apartmentId);
-    // If no one accepted, clear the active call
-    if (activeCall && activeCall.apartmentId === apartmentId && !activeCall.acceptedBy) {
-      clearCall();
+    // If no one accepted, clear the active call for this intercom
+    const call = getActiveCall(intercomDeviceId);
+    if (call && call.apartmentId === apartmentId && !call.acceptedBy) {
+      clearCall(intercomDeviceId);
     }
   }, 30000);
-  pendingRings.set(apartmentId, timeout);
+  pendingRings.set(apartmentId, { timeout, intercomDeviceId });
 }
 
 function clearPendingRing(apartmentId) {
-  const timeout = pendingRings.get(apartmentId);
-  if (timeout) {
-    clearTimeout(timeout);
+  const entry = pendingRings.get(apartmentId);
+  if (entry) {
+    clearTimeout(entry.timeout);
     pendingRings.delete(apartmentId);
   }
 }
@@ -110,21 +151,39 @@ function isPendingRing(apartmentId) {
   return pendingRings.has(apartmentId);
 }
 
+function getPendingRing(apartmentId) {
+  return pendingRings.get(apartmentId) || null;
+}
+
 // ---- Legacy in-memory token maps (kept for backward compat during transition) ----
 const fcmTokens = new Map();
 const voipTokens = new Map();
 
 module.exports = {
   clients,
+  intercoms,
+  addIntercom,
+  removeIntercom,
+  getIntercom,
+  getIntercomForBuilding,
   homeClients,
   addHomeClient,
   removeHomeClient,
   getHomeClients,
   sendToApartment,
-  activeCall: { start: startCall, get: getActiveCall, accept: acceptCall, decline: declineCall, clear: clearCall },
+  activeCall: {
+    start: startCall,
+    get: getActiveCall,
+    getByApartment: getActiveCallByApartment,
+    accept: acceptCall,
+    decline: declineCall,
+    clear: clearCall,
+  },
+  activeCalls,
   setPendingRing,
   clearPendingRing,
   isPendingRing,
+  getPendingRing,
   fcmTokens,
   voipTokens,
 };

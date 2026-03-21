@@ -2,7 +2,7 @@
 // Portal APIs (/api/admin/*, /api/management/*) have moved to Lambda (see ../lambda/)
 // Portal HTML (admin.html, management.html) served from S3+CloudFront (see ../portals/)
 const { generateDeviceToken, verifyToken } = require('./auth');
-const { clients, fcmTokens, voipTokens, activeCall, clearPendingRing, isPendingRing, sendToApartment } = require('./connectionState');
+const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getIntercomForBuilding, clearPendingRing, isPendingRing, sendToApartment } = require('./connectionState');
 const { isAPNsReady } = require('./apnsService');
 const { query } = require('./db');
 
@@ -62,14 +62,22 @@ async function handleRequest(req, res) {
   try {
     if (req.method === 'POST' && urlPath === '/decline') {
       console.log('[HTTP] Decline request received');
-      const call = activeCall.get();
-      if (call && call.apartmentId) {
-        clearPendingRing(call.apartmentId);
-      }
-      activeCall.clear();
-      if (clients.intercom && clients.intercom.readyState === 1) {
+      const body = await readBody(req);
+      const { apartmentId } = body;
+      // Find the active call for this apartment
+      const callInfo = apartmentId ? activeCall.getByApartment(apartmentId) : null;
+      if (callInfo) {
+        clearPendingRing(callInfo.apartmentId);
+        activeCall.clear(callInfo.intercomDeviceId);
+        const intercom = getIntercom(callInfo.intercomDeviceId);
+        if (intercom && intercom.ws.readyState === 1) {
+          intercom.ws.send(JSON.stringify({ type: 'decline' }));
+          console.log(`[HTTP] Decline relayed to intercom=${callInfo.intercomDeviceId}`);
+        }
+      } else if (clients.intercom && clients.intercom.readyState === 1) {
+        // Legacy fallback — clear all
         clients.intercom.send(JSON.stringify({ type: 'decline' }));
-        console.log('[HTTP] Decline relayed to intercom');
+        console.log('[HTTP] Decline relayed to intercom (legacy)');
       }
       json(res, { ok: true });
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {
@@ -172,16 +180,31 @@ async function handleRequest(req, res) {
       console.log(`[HTTP] Device provisioned: ${device.deviceId}`);
       json(res, { token, deviceId: device.deviceId, buildingId: device.buildingId });
     } else if (req.method === 'GET' && urlPath === '/debug/status') {
-      const call = activeCall.get();
+      // Collect all active calls across intercoms
+      const calls = {};
+      for (const [devId, call] of activeCalls) {
+        calls[devId] = {
+          apartmentId: call.apartmentId,
+          type: call.type,
+          acceptedBy: call.acceptedBy,
+          declinedCount: call.declinedBy.size,
+        };
+      }
+      // Collect intercom connection states
+      const intercomStatuses = {};
+      for (const [devId, entry] of intercoms) {
+        intercomStatuses[devId] = {
+          buildingId: entry.buildingId,
+          connected: entry.ws.readyState === 1,
+        };
+      }
       const status = {
+        intercoms: intercomStatuses,
+        activeCalls: calls,
+        // Legacy single-client info
         clients: {
           intercom: clients.intercom ? (clients.intercom.readyState === 1 ? 'connected' : 'stale') : null,
         },
-        activeCall: call ? {
-          apartmentId: call.apartmentId,
-          acceptedBy: call.acceptedBy,
-          declinedCount: call.declinedBy.size,
-        } : null,
         fcmTokens: {
           home: fcmTokens.has('home') ? fcmTokens.get('home').substring(0, 20) + '...' : null,
           intercom: fcmTokens.has('intercom') ? fcmTokens.get('intercom').substring(0, 20) + '...' : null,
