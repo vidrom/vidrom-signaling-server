@@ -235,6 +235,30 @@ function handleConnection(ws) {
           if (clients.home && clients.home !== ws && clients.home.readyState === 1) {
             clients.home.send(JSON.stringify({ type: 'call-taken' }));
           }
+
+          // Send call-taken via FCM to devices that may not have a WS connection
+          // (e.g. iOS showing CallKit from VoIP push without an active WebSocket)
+          try {
+            const callTakenTokens = await query(
+              'SELECT token FROM device_tokens WHERE apartment_id = $1 AND token_type = $2',
+              [call.apartmentId, 'fcm']
+            );
+            for (const row of callTakenTokens.rows) {
+              admin.messaging().send({
+                token: row.token,
+                data: { type: 'call-taken' },
+                android: { priority: 'high' },
+                apns: {
+                  headers: { 'apns-priority': '10' },
+                  payload: { aps: { 'content-available': 1 } },
+                },
+              })
+                .then(() => console.log(`[${id}] call-taken FCM sent (apartment=${call.apartmentId})`))
+                .catch((err) => console.error(`[${id}] call-taken FCM failed:`, err.message));
+            }
+          } catch (err) {
+            console.error(`[${id}] Error sending call-taken FCM:`, err.message);
+          }
         } else {
           // Someone else already accepted — tell this client
           ws.send(JSON.stringify({ type: 'call-taken' }));
