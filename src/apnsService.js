@@ -53,7 +53,7 @@ function initAPNs() {
  * @param {string} callerName - Display name for the caller
  * @returns {Promise<{success: boolean, reason?: string}>}
  */
-async function sendVoipPush(voipToken, callerName) {
+async function sendVoipPush(voipToken, callerName, payloadOverride) {
   if (!provider) {
     console.warn('[APNs] Provider not initialized — skipping VoIP push');
     return { success: false, reason: 'APNs provider not initialized' };
@@ -64,7 +64,7 @@ async function sendVoipPush(voipToken, callerName) {
   notification.expiry = Math.floor(Date.now() / 1000) + 30; // 30 second TTL (call timeout)
   notification.priority = 10;  // Immediate delivery
   notification.pushType = 'voip';
-  notification.payload = {
+  notification.payload = payloadOverride || {
     callerName,
     type: 'incoming-call',
   };

@@ -67,17 +67,20 @@ async function handleRequest(req, res) {
       // Find the active call for this apartment
       const callInfo = apartmentId ? activeCall.getByApartment(apartmentId) : null;
       if (callInfo) {
-        clearPendingRing(callInfo.apartmentId);
-        activeCall.clear(callInfo.intercomDeviceId);
-        const intercom = getIntercom(callInfo.intercomDeviceId);
-        if (intercom && intercom.ws.readyState === 1) {
-          intercom.ws.send(JSON.stringify({ type: 'decline' }));
-          console.log(`[HTTP] Decline relayed to intercom=${callInfo.intercomDeviceId}`);
+        // Don't relay decline if someone already accepted the call
+        if (callInfo.acceptedBy) {
+          console.log(`[HTTP] Decline ignored — call already accepted (accepted=${callInfo.acceptedBy})`);
+        } else {
+          clearPendingRing(callInfo.apartmentId);
+          activeCall.clear(callInfo.intercomDeviceId);
+          const intercom = getIntercom(callInfo.intercomDeviceId);
+          if (intercom && intercom.ws.readyState === 1) {
+            intercom.ws.send(JSON.stringify({ type: 'decline' }));
+            console.log(`[HTTP] Decline relayed to intercom=${callInfo.intercomDeviceId}`);
+          }
         }
-      } else if (clients.intercom && clients.intercom.readyState === 1) {
-        // Legacy fallback — clear all
-        clients.intercom.send(JSON.stringify({ type: 'decline' }));
-        console.log('[HTTP] Decline relayed to intercom (legacy)');
+      } else {
+        console.log('[HTTP] Decline ignored — no active call found');
       }
       json(res, { ok: true });
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {

@@ -236,28 +236,36 @@ function handleConnection(ws) {
             clients.home.send(JSON.stringify({ type: 'call-taken' }));
           }
 
-          // Send call-taken via FCM to devices that may not have a WS connection
-          // (e.g. iOS showing CallKit from VoIP push without an active WebSocket)
+          // Send call-taken push to devices that may not have a WS connection
           try {
             const callTakenTokens = await query(
-              'SELECT token FROM device_tokens WHERE apartment_id = $1 AND token_type = $2',
-              [call.apartmentId, 'fcm']
+              'SELECT token, token_type FROM device_tokens WHERE apartment_id = $1',
+              [call.apartmentId]
             );
             for (const row of callTakenTokens.rows) {
-              admin.messaging().send({
-                token: row.token,
-                data: { type: 'call-taken' },
-                android: { priority: 'high' },
-                apns: {
-                  headers: { 'apns-priority': '10' },
-                  payload: { aps: { 'content-available': 1 } },
-                },
-              })
-                .then(() => console.log(`[${id}] call-taken FCM sent (apartment=${call.apartmentId})`))
-                .catch((err) => console.error(`[${id}] call-taken FCM failed:`, err.message));
+              if (row.token_type === 'voip' && isAPNsReady()) {
+                // iOS: VoIP push is the only reliable way to wake the app and dismiss CallKit
+                sendVoipPush(row.token, 'call-taken', { type: 'call-taken' })
+                  .then((result) => {
+                    if (result.success) {
+                      console.log(`[${id}] call-taken VoIP push sent (apartment=${call.apartmentId})`);
+                    } else {
+                      console.error(`[${id}] call-taken VoIP push failed: ${result.reason}`);
+                    }
+                  })
+                  .catch((err) => console.error(`[${id}] call-taken VoIP push error:`, err.message));
+              } else if (row.token_type === 'fcm') {
+                admin.messaging().send({
+                  token: row.token,
+                  data: { type: 'call-taken' },
+                  android: { priority: 'high' },
+                })
+                  .then(() => console.log(`[${id}] call-taken FCM sent (apartment=${call.apartmentId})`))
+                  .catch((err) => console.error(`[${id}] call-taken FCM failed:`, err.message));
+              }
             }
           } catch (err) {
-            console.error(`[${id}] Error sending call-taken FCM:`, err.message);
+            console.error(`[${id}] Error sending call-taken push:`, err.message);
           }
         } else {
           // Someone else already accepted — tell this client
@@ -422,6 +430,14 @@ function handleConnection(ws) {
           if (targetIntercom) {
             const call = activeCall.get(targetIntercom);
             if (call) {
+              // Only relay hangup if this is the accepted client (or no one accepted yet).
+              // Other apartment devices that lost the first-accept-wins race may
+              // spuriously send hangup when their CallKit UI is dismissed; relaying
+              // that would kill the winning device's call.
+              if (call.acceptedBy && call.acceptedBy !== id) {
+                console.log(`[${id}] Hangup ignored — not the accepted client (accepted=${call.acceptedBy})`);
+                break;
+              }
               clearPendingRing(call.apartmentId);
               activeCall.clear(targetIntercom);
             }
