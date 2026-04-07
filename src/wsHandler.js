@@ -208,6 +208,11 @@ function handleConnection(ws) {
                     console.log(`[${id}] VoIP push sent (apartment=${targetApartmentId})`);
                   } else {
                     console.error(`[${id}] VoIP push failed: ${result.reason}`);
+                    if (result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') {
+                      query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'voip'", [row.token])
+                        .then(() => console.log(`[${id}] Deleted stale VoIP token`))
+                        .catch((e) => console.error(`[${id}] Failed to delete stale VoIP token:`, e.message));
+                    }
                   }
                 })
                 .catch((err) => console.error(`[${id}] VoIP push error:`, err.message));
@@ -223,7 +228,14 @@ function handleConnection(ws) {
                 android: { priority: 'high' },
               })
                 .then(() => console.log(`[${id}] FCM push sent (apartment=${targetApartmentId}, platform=${row.platform})`))
-                .catch((err) => console.error(`[${id}] FCM push failed:`, err.message));
+                .catch((err) => {
+                  console.error(`[${id}] FCM push failed:`, err.message);
+                  if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+                    query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'fcm'", [row.token])
+                      .then(() => console.log(`[${id}] Deleted stale FCM token`))
+                      .catch((e) => console.error(`[${id}] Failed to delete stale FCM token:`, e.message));
+                  }
+                });
             }
           }
 
@@ -291,6 +303,11 @@ function handleConnection(ws) {
                       console.log(`[${id}] call-taken VoIP push sent (apartment=${call.apartmentId})`);
                     } else {
                       console.error(`[${id}] call-taken VoIP push failed: ${result.reason}`);
+                      if (result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') {
+                        query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'voip'", [row.token])
+                          .then(() => console.log(`[${id}] Deleted stale VoIP token (call-taken)`))
+                          .catch((e) => console.error(`[${id}] Failed to delete stale VoIP token:`, e.message));
+                      }
                     }
                   })
                   .catch((err) => console.error(`[${id}] call-taken VoIP push error:`, err.message));
@@ -301,7 +318,14 @@ function handleConnection(ws) {
                   android: { priority: 'high' },
                 })
                   .then(() => console.log(`[${id}] call-taken FCM sent (apartment=${call.apartmentId})`))
-                  .catch((err) => console.error(`[${id}] call-taken FCM failed:`, err.message));
+                  .catch((err) => {
+                    console.error(`[${id}] call-taken FCM failed:`, err.message);
+                    if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+                      query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'fcm'", [row.token])
+                        .then(() => console.log(`[${id}] Deleted stale FCM token (call-taken)`))
+                        .catch((e) => console.error(`[${id}] Failed to delete stale FCM token:`, e.message));
+                    }
+                  });
               }
             }
           } catch (err) {
@@ -570,6 +594,10 @@ function handleConnection(ws) {
              VALUES ($1, $2, $3, 'fcm', $4, NOW())
              ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, platform = $4, updated_at = NOW()`,
             [apartmentId, message.userId, message.token, platform]
+          );
+          await query(
+            "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
+            [message.userId, message.token]
           );
           console.log(`[${id}] FCM token registered via WS (apartment=${apartmentId})`);
         } else if (role) {

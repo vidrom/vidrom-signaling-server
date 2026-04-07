@@ -96,6 +96,10 @@ async function handleRequest(req, res) {
            ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, platform = $4, updated_at = NOW()`,
           [apartmentId, userId, token, platform || 'android']
         );
+        await query(
+          "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
+          [userId, token]
+        );
         console.log(`[HTTP] FCM token registered for apartment=${apartmentId} user=${userId}`);
         json(res, { ok: true });
       } else if (role && token) {
@@ -118,6 +122,10 @@ async function handleRequest(req, res) {
            VALUES ($1, $2, $3, 'voip', 'ios', NOW())
            ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, updated_at = NOW()`,
           [apartmentId, userId, token]
+        );
+        await query(
+          "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'voip' AND token != $2",
+          [userId, token]
         );
         console.log(`[HTTP] VoIP token registered for apartment=${apartmentId} user=${userId}`);
         json(res, { ok: true });
