@@ -186,7 +186,31 @@ function handleConnection(ws) {
 
         // Start tracking this call
         activeCall.start(deviceId, targetApartmentId, 'call');
-        setPendingRing(targetApartmentId, deviceId);
+
+        // Query building-level no_answer_timeout for this apartment
+        let ringTimeoutSec = 30;
+        try {
+          const bldgResult = await query(
+            'SELECT b.no_answer_timeout FROM buildings b JOIN apartments a ON a.building_id = b.id WHERE a.id = $1',
+            [targetApartmentId]
+          );
+          if (bldgResult.rows.length > 0 && bldgResult.rows[0].no_answer_timeout != null) {
+            ringTimeoutSec = bldgResult.rows[0].no_answer_timeout;
+          } else {
+            const gsResult = await query(
+              "SELECT value FROM global_settings WHERE key = 'no_answer_timeout'"
+            );
+            if (gsResult.rows.length > 0) {
+              ringTimeoutSec = parseInt(gsResult.rows[0].value, 10) || 30;
+            }
+          }
+        } catch (err) {
+          console.error(`[${id}] Error querying no_answer_timeout, using default 30s:`, err.message);
+        }
+        const ringTimeoutMs = ringTimeoutSec * 1000;
+        console.log(`[${id}] Ring timeout for apartment=${targetApartmentId}: ${ringTimeoutSec}s`);
+
+        setPendingRing(targetApartmentId, deviceId, ringTimeoutMs);
 
         // 1. Send WS ring to all connected home clients for this apartment
         const wsSent = sendToApartment(targetApartmentId, { type: 'ring' });
@@ -202,7 +226,7 @@ function handleConnection(ws) {
           for (const row of tokenResult.rows) {
             if (row.token_type === 'voip' && isAPNsReady()) {
               // iOS VoIP push
-              sendVoipPush(row.token, 'Intercom')
+              sendVoipPush(row.token, 'Intercom', undefined, ringTimeoutSec)
                 .then((result) => {
                   if (result.success) {
                     console.log(`[${id}] VoIP push sent (apartment=${targetApartmentId})`);
@@ -225,7 +249,7 @@ function handleConnection(ws) {
                   callerName: 'Intercom',
                   apartmentId: targetApartmentId,
                 },
-                android: { priority: 'high' },
+                android: { priority: 'high', ttl: ringTimeoutMs },
               })
                 .then(() => console.log(`[${id}] FCM push sent (apartment=${targetApartmentId}, platform=${row.platform})`))
                 .catch((err) => {
