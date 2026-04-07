@@ -20,6 +20,41 @@ const {
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
 
+// ---- Max-call-duration safety net (auto-hangup after 60s) ----
+const MAX_CALL_DURATION_MS = 60_000;
+const callDurationTimers = new Map(); // intercomDeviceId → timeout
+
+function startCallDurationTimer(intercomDeviceId) {
+  clearCallDurationTimer(intercomDeviceId);
+  const timer = setTimeout(() => {
+    callDurationTimers.delete(intercomDeviceId);
+    const call = activeCall.get(intercomDeviceId);
+    if (!call) return;
+    console.log(`[TIMEOUT] Max call duration reached for intercom=${intercomDeviceId}, auto-hangup`);
+
+    // Notify both sides
+    const intercom = getIntercom(intercomDeviceId);
+    if (intercom && intercom.ws.readyState === 1) {
+      intercom.ws.send(JSON.stringify({ type: 'hangup', reason: 'timeout' }));
+    }
+    if (call.acceptedWs && call.acceptedWs.readyState === 1) {
+      call.acceptedWs.send(JSON.stringify({ type: 'hangup', reason: 'timeout' }));
+    }
+    sendToApartment(call.apartmentId, { type: 'hangup', reason: 'timeout' });
+    clearPendingRing(call.apartmentId);
+    activeCall.clear(intercomDeviceId);
+  }, MAX_CALL_DURATION_MS);
+  callDurationTimers.set(intercomDeviceId, timer);
+}
+
+function clearCallDurationTimer(intercomDeviceId) {
+  const timer = callDurationTimers.get(intercomDeviceId);
+  if (timer) {
+    clearTimeout(timer);
+    callDurationTimers.delete(intercomDeviceId);
+  }
+}
+
 function handleConnection(ws) {
   const id = uuidv4();
   let role = null;
@@ -27,6 +62,10 @@ function handleConnection(ws) {
   let buildingId = null;      // resolved for both roles
   let apartmentId = null;     // set when home client registers with an apartment
   let intercomDeviceId = null; // which intercom this home client routes to
+
+  // Mark alive for server-level heartbeat ping/pong
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   console.log(`[${id}] New connection`);
 
@@ -217,6 +256,7 @@ function handleConnection(ws) {
           intercomDeviceId = targetIntercom;
           // This resident won the race — relay accept to intercom
           clearPendingRing(call.apartmentId);
+          startCallDurationTimer(targetIntercom);
           const intercom = getIntercom(targetIntercom);
           if (intercom && intercom.ws.readyState === 1) {
             intercom.ws.send(JSON.stringify({ type: 'accept' }));
@@ -297,6 +337,7 @@ function handleConnection(ws) {
         if (allDeclined && aptClients.size > 0) {
           // Everyone declined — relay to intercom
           clearPendingRing(call.apartmentId);
+          clearCallDurationTimer(targetIntercom);
           activeCall.clear(targetIntercom);
           const intercom = getIntercom(targetIntercom);
           if (intercom && intercom.ws.readyState === 1) {
@@ -400,6 +441,7 @@ function handleConnection(ws) {
           const call = activeCall.get(targetIntercom);
           if (call) {
             clearPendingRing(call.apartmentId);
+            clearCallDurationTimer(targetIntercom);
             activeCall.clear(targetIntercom);
           }
         }
@@ -413,6 +455,7 @@ function handleConnection(ws) {
           const call = activeCall.get(deviceId);
           if (call) {
             clearPendingRing(call.apartmentId);
+            clearCallDurationTimer(deviceId);
             // Notify the accepted home client + all ringing clients
             if (call.acceptedWs && call.acceptedWs.readyState === 1) {
               call.acceptedWs.send(JSON.stringify({ type: 'hangup' }));
@@ -439,6 +482,7 @@ function handleConnection(ws) {
                 break;
               }
               clearPendingRing(call.apartmentId);
+              clearCallDurationTimer(targetIntercom);
               activeCall.clear(targetIntercom);
             }
             const intercom = getIntercom(targetIntercom);
@@ -550,6 +594,7 @@ function handleConnection(ws) {
         const call = activeCall.get(deviceId);
         if (call) {
           clearPendingRing(call.apartmentId);
+          clearCallDurationTimer(deviceId);
           sendToApartment(call.apartmentId, { type: 'peer-disconnected', role: 'intercom' });
           activeCall.clear(deviceId);
         }
@@ -577,6 +622,7 @@ function handleConnection(ws) {
 
       if (call && call.acceptedBy === id) {
         // Accepted client disconnected — notify intercom
+        clearCallDurationTimer(targetIntercom);
         activeCall.clear(targetIntercom);
         const intercom = getIntercom(targetIntercom);
         if (intercom && intercom.ws.readyState === 1) {
@@ -595,6 +641,7 @@ function handleConnection(ws) {
         }
         if (allDeclined) {
           clearPendingRing(call.apartmentId);
+          clearCallDurationTimer(targetIntercom);
           activeCall.clear(targetIntercom);
           const intercom = getIntercom(targetIntercom);
           if (intercom && intercom.ws.readyState === 1) {

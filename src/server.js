@@ -28,6 +28,22 @@ const httpServer = http.createServer((req, res) => handleRequest(req, res));
 const wss = new WebSocketServer({ server: httpServer });
 wss.on('connection', handleConnection);
 
+// ---- Ping/Pong heartbeat: detect zombie connections within ~20-40s ----
+const HEARTBEAT_INTERVAL_MS = 20_000;
+const heartbeatInterval = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      console.log('[HEARTBEAT] Terminating dead socket');
+      ws.terminate(); // triggers 'close' handler in wsHandler.js
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(heartbeatInterval));
+
 httpServer.listen(PORT, async () => {
   console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
   await testConnection();
