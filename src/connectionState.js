@@ -79,10 +79,11 @@ function sendToApartment(apartmentId, message) {
 // activeCalls: deviceId → { apartmentId, type, acceptedBy, acceptedWs, declinedBy }
 const activeCalls = new Map();
 
-function startCall(intercomDeviceId, apartmentId, type = 'call') {
+function startCall(intercomDeviceId, apartmentId, type = 'call', callId = null) {
   activeCalls.set(intercomDeviceId, {
     apartmentId,
     type,
+    callId,
     acceptedBy: null,
     acceptedWs: null,
     declinedBy: new Set(),
@@ -125,7 +126,7 @@ function clearCall(intercomDeviceId) {
 // ---- Per-apartment pending ring (survives WS reconnection) ----
 const pendingRings = new Map(); // apartmentId → { timeout, intercomDeviceId }
 
-function setPendingRing(apartmentId, intercomDeviceId, timeoutMs = 30000) {
+function setPendingRing(apartmentId, intercomDeviceId, timeoutMs = 30000, onExpired) {
   clearPendingRing(apartmentId);
   const timeout = setTimeout(() => {
     console.log(`[PENDING] Ring expired for apartment ${apartmentId} after ${timeoutMs / 1000}s`);
@@ -133,6 +134,7 @@ function setPendingRing(apartmentId, intercomDeviceId, timeoutMs = 30000) {
     // If no one accepted, clear the active call for this intercom
     const call = getActiveCall(intercomDeviceId);
     if (call && call.apartmentId === apartmentId && !call.acceptedBy) {
+      if (onExpired) onExpired(call);
       clearCall(intercomDeviceId);
     }
   }, timeoutMs);

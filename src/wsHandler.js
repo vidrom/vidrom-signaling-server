@@ -32,15 +32,21 @@ function startCallDurationTimer(intercomDeviceId) {
     if (!call) return;
     console.log(`[TIMEOUT] Max call duration reached for intercom=${intercomDeviceId}, auto-hangup`);
 
+    // Update DB: mark call as ended
+    if (call.callId) {
+      query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] timeout update calls:', e.message));
+      query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by max duration timeout')", [call.callId, call.apartmentId, intercomDeviceId]).catch(e => console.error('[DB] timeout audit_log:', e.message));
+    }
+
     // Notify both sides
     const intercom = getIntercom(intercomDeviceId);
     if (intercom && intercom.ws.readyState === 1) {
-      intercom.ws.send(JSON.stringify({ type: 'hangup', reason: 'timeout' }));
+      intercom.ws.send(JSON.stringify({ type: 'hangup', reason: 'timeout', callId: call.callId }));
     }
     if (call.acceptedWs && call.acceptedWs.readyState === 1) {
-      call.acceptedWs.send(JSON.stringify({ type: 'hangup', reason: 'timeout' }));
+      call.acceptedWs.send(JSON.stringify({ type: 'hangup', reason: 'timeout', callId: call.callId }));
     }
-    sendToApartment(call.apartmentId, { type: 'hangup', reason: 'timeout' });
+    sendToApartment(call.apartmentId, { type: 'hangup', reason: 'timeout', callId: call.callId });
     clearPendingRing(call.apartmentId);
     activeCall.clear(intercomDeviceId);
   }, MAX_CALL_DURATION_MS);
@@ -154,8 +160,9 @@ function handleConnection(ws) {
 
         // If home just connected and there's a pending ring for their apartment, re-send it
         if (role === 'home' && apartmentId && isPendingRing(apartmentId)) {
+          const pendingCallInfo = activeCall.getByApartment(apartmentId);
           console.log(`[${id}] Re-sending pending ring to home (apartment=${apartmentId})`);
-          ws.send(JSON.stringify({ type: 'ring' }));
+          ws.send(JSON.stringify({ type: 'ring', callId: pendingCallInfo?.callId || null }));
         }
         break;
       }
@@ -184,8 +191,22 @@ function handleConnection(ws) {
           activeCall.clear(deviceId);
         }
 
-        // Start tracking this call
-        activeCall.start(deviceId, targetApartmentId, 'call');
+        // Create call record in DB and start tracking
+        const callId = uuidv4();
+        try {
+          await query(
+            "INSERT INTO calls (id, building_id, apartment_id, intercom_id, status) VALUES ($1, $2, $3, $4, 'calling')",
+            [callId, buildingId, targetApartmentId, deviceId]
+          );
+          await query(
+            "INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-initiated', $1, $2, $3, $4, 'Ring started by intercom')",
+            [buildingId, targetApartmentId, deviceId, callId]
+          );
+        } catch (err) {
+          console.error(`[${id}] Error inserting call record:`, err.message);
+        }
+
+        activeCall.start(deviceId, targetApartmentId, 'call', callId);
 
         // Query building-level no_answer_timeout for this apartment
         let ringTimeoutSec = 30;
@@ -210,10 +231,16 @@ function handleConnection(ws) {
         const ringTimeoutMs = ringTimeoutSec * 1000;
         console.log(`[${id}] Ring timeout for apartment=${targetApartmentId}: ${ringTimeoutSec}s`);
 
-        setPendingRing(targetApartmentId, deviceId, ringTimeoutMs);
+        setPendingRing(targetApartmentId, deviceId, ringTimeoutMs, (expiredCall) => {
+          // Ring expired — update DB
+          if (expiredCall.callId) {
+            query("UPDATE calls SET status = 'unanswered', updated_at = NOW() WHERE id = $1", [expiredCall.callId]).catch(e => console.error('[DB] ring-expired update calls:', e.message));
+            query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-unanswered', $1, $2, $3, $4, 'Ring expired with no answer')", [buildingId, targetApartmentId, deviceId, expiredCall.callId]).catch(e => console.error('[DB] ring-expired audit_log:', e.message));
+          }
+        });
 
         // 1. Send WS ring to all connected home clients for this apartment
-        const wsSent = sendToApartment(targetApartmentId, { type: 'ring' });
+        const wsSent = sendToApartment(targetApartmentId, { type: 'ring', callId });
         console.log(`[${id}] Ring sent to ${wsSent} connected home client(s)`);
 
         // 2. Send push notifications to all registered devices for this apartment (from DB)
@@ -226,7 +253,7 @@ function handleConnection(ws) {
           for (const row of tokenResult.rows) {
             if (row.token_type === 'voip' && isAPNsReady()) {
               // iOS VoIP push
-              sendVoipPush(row.token, 'Intercom', undefined, ringTimeoutSec)
+              sendVoipPush(row.token, 'Intercom', { callerName: 'Intercom', type: 'incoming-call', callId }, ringTimeoutSec)
                 .then((result) => {
                   if (result.success) {
                     console.log(`[${id}] VoIP push sent (apartment=${targetApartmentId})`);
@@ -248,6 +275,7 @@ function handleConnection(ws) {
                   type: 'incoming-call',
                   callerName: 'Intercom',
                   apartmentId: targetApartmentId,
+                  callId,
                 },
                 android: { priority: 'high', ttl: ringTimeoutMs },
               })
@@ -293,9 +321,16 @@ function handleConnection(ws) {
           // This resident won the race — relay accept to intercom
           clearPendingRing(call.apartmentId);
           startCallDurationTimer(targetIntercom);
+
+          // Update DB: call accepted
+          if (call.callId) {
+            query("UPDATE calls SET status = 'accepted', updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] accept update calls:', e.message));
+            query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-accepted', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call accepted by resident')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] accept audit_log:', e.message));
+          }
+
           const intercom = getIntercom(targetIntercom);
           if (intercom && intercom.ws.readyState === 1) {
-            intercom.ws.send(JSON.stringify({ type: 'accept' }));
+            intercom.ws.send(JSON.stringify({ type: 'accept', callId: call.callId }));
             console.log(`[${id}] Accept relayed to intercom=${targetIntercom} (first-accept-wins)`);
           }
 
@@ -303,13 +338,13 @@ function handleConnection(ws) {
           const aptClients = getHomeClients(call.apartmentId);
           for (const [connId, entry] of aptClients) {
             if (connId !== id && entry.ws.readyState === 1) {
-              entry.ws.send(JSON.stringify({ type: 'call-taken' }));
+              entry.ws.send(JSON.stringify({ type: 'call-taken', callId: call.callId }));
               console.log(`[${id}] Sent call-taken to ${connId}`);
             }
           }
           // Also notify legacy home client if it's not the acceptor
           if (clients.home && clients.home !== ws && clients.home.readyState === 1) {
-            clients.home.send(JSON.stringify({ type: 'call-taken' }));
+            clients.home.send(JSON.stringify({ type: 'call-taken', callId: call.callId }));
           }
 
           // Send call-taken push to devices that may not have a WS connection
@@ -321,7 +356,7 @@ function handleConnection(ws) {
             for (const row of callTakenTokens.rows) {
               if (row.token_type === 'voip' && isAPNsReady()) {
                 // iOS: VoIP push is the only reliable way to wake the app and dismiss CallKit
-                sendVoipPush(row.token, 'call-taken', { type: 'call-taken' })
+                sendVoipPush(row.token, 'call-taken', { type: 'call-taken', callId: call.callId })
                   .then((result) => {
                     if (result.success) {
                       console.log(`[${id}] call-taken VoIP push sent (apartment=${call.apartmentId})`);
@@ -338,7 +373,7 @@ function handleConnection(ws) {
               } else if (row.token_type === 'fcm') {
                 admin.messaging().send({
                   token: row.token,
-                  data: { type: 'call-taken' },
+                  data: { type: 'call-taken', callId: call.callId || '' },
                   android: { priority: 'high' },
                 })
                   .then(() => console.log(`[${id}] call-taken FCM sent (apartment=${call.apartmentId})`))
@@ -357,7 +392,7 @@ function handleConnection(ws) {
           }
         } else {
           // Someone else already accepted — tell this client
-          ws.send(JSON.stringify({ type: 'call-taken' }));
+          ws.send(JSON.stringify({ type: 'call-taken', callId: call.callId }));
           console.log(`[${id}] Call already accepted, sent call-taken`);
         }
         break;
@@ -386,6 +421,13 @@ function handleConnection(ws) {
           // Everyone declined — relay to intercom
           clearPendingRing(call.apartmentId);
           clearCallDurationTimer(targetIntercom);
+
+          // Update DB: all rejected
+          if (call.callId) {
+            query("UPDATE calls SET status = 'rejected', updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] decline update calls:', e.message));
+            query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-rejected', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'All residents declined')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] decline audit_log:', e.message));
+          }
+
           activeCall.clear(targetIntercom);
           const intercom = getIntercom(targetIntercom);
           if (intercom && intercom.ws.readyState === 1) {
@@ -488,6 +530,11 @@ function handleConnection(ws) {
         if (targetIntercom) {
           const call = activeCall.get(targetIntercom);
           if (call) {
+            // Update DB: call ended (door opened)
+            if (call.callId) {
+              query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] open-door update calls:', e.message));
+              query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended after door open')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] open-door audit_log:', e.message));
+            }
             clearPendingRing(call.apartmentId);
             clearCallDurationTimer(targetIntercom);
             activeCall.clear(targetIntercom);
@@ -504,11 +551,18 @@ function handleConnection(ws) {
           if (call) {
             clearPendingRing(call.apartmentId);
             clearCallDurationTimer(deviceId);
+
+            // Update DB: call ended
+            if (call.callId) {
+              query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] hangup update calls:', e.message));
+              query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by intercom hangup')", [call.callId, call.apartmentId, deviceId]).catch(e => console.error('[DB] hangup audit_log:', e.message));
+            }
+
             // Notify the accepted home client + all ringing clients
             if (call.acceptedWs && call.acceptedWs.readyState === 1) {
-              call.acceptedWs.send(JSON.stringify({ type: 'hangup' }));
+              call.acceptedWs.send(JSON.stringify({ type: 'hangup', callId: call.callId }));
             }
-            sendToApartment(call.apartmentId, { type: 'hangup' });
+            sendToApartment(call.apartmentId, { type: 'hangup', callId: call.callId });
             activeCall.clear(deviceId);
           }
           // Legacy fallback
@@ -529,6 +583,13 @@ function handleConnection(ws) {
                 console.log(`[${id}] Hangup ignored — not the accepted client (accepted=${call.acceptedBy})`);
                 break;
               }
+
+              // Update DB: call ended
+              if (call.callId) {
+                query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] hangup update calls:', e.message));
+                query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by home hangup')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] hangup audit_log:', e.message));
+              }
+
               clearPendingRing(call.apartmentId);
               clearCallDurationTimer(targetIntercom);
               activeCall.clear(targetIntercom);
@@ -647,6 +708,13 @@ function handleConnection(ws) {
         if (call) {
           clearPendingRing(call.apartmentId);
           clearCallDurationTimer(deviceId);
+
+          // Update DB: call ended due to intercom disconnect
+          if (call.callId) {
+            query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] intercom-disconnect update calls:', e.message));
+            query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by intercom disconnect')", [call.callId, call.apartmentId, deviceId]).catch(e => console.error('[DB] intercom-disconnect audit_log:', e.message));
+          }
+
           sendToApartment(call.apartmentId, { type: 'peer-disconnected', role: 'intercom' });
           activeCall.clear(deviceId);
         }
@@ -675,6 +743,13 @@ function handleConnection(ws) {
       if (call && call.acceptedBy === id) {
         // Accepted client disconnected — notify intercom
         clearCallDurationTimer(targetIntercom);
+
+        // Update DB: call ended due to home disconnect
+        if (call.callId) {
+          query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] home-disconnect update calls:', e.message));
+          query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by home disconnect')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] home-disconnect audit_log:', e.message));
+        }
+
         activeCall.clear(targetIntercom);
         const intercom = getIntercom(targetIntercom);
         if (intercom && intercom.ws.readyState === 1) {
@@ -694,6 +769,13 @@ function handleConnection(ws) {
         if (allDeclined) {
           clearPendingRing(call.apartmentId);
           clearCallDurationTimer(targetIntercom);
+
+          // Update DB: all rejected (via disconnect)
+          if (call.callId) {
+            query("UPDATE calls SET status = 'rejected', updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] disconnect-decline update calls:', e.message));
+            query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-rejected', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'All residents declined/disconnected')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] disconnect-decline audit_log:', e.message));
+          }
+
           activeCall.clear(targetIntercom);
           const intercom = getIntercom(targetIntercom);
           if (intercom && intercom.ws.readyState === 1) {
