@@ -211,6 +211,29 @@ async function handleRequest(req, res) {
       console.log(`[HTTP] Client error logged: app=${app} type=${error_type}`);
       json(res, { ok: true });
 
+    } else if (req.method === 'POST' && urlPath.startsWith('/api/home/calls/') && urlPath.endsWith('/ack')) {
+      const parts = urlPath.split('/');
+      const callId = parts[4]; // /api/home/calls/:callId/ack
+      if (!callId) { json(res, { error: 'callId required' }, 400); return; }
+
+      const body = await readBody(req);
+      const { event, deviceToken, tokenType, platform, userId } = body;
+      const allowedEvents = ['push-received', 'app-awake', 'incoming-ui-shown', 'accepted', 'declined'];
+      if (!event || !allowedEvents.includes(event)) { json(res, { error: 'Invalid event' }, 400); return; }
+      if (!deviceToken || !tokenType || !platform) { json(res, { error: 'deviceToken, tokenType, and platform are required' }, 400); return; }
+
+      // Validate callId exists
+      const callResult = await query('SELECT status FROM calls WHERE id = $1', [callId]);
+      if (callResult.rows.length === 0) { json(res, { error: 'Call not found' }, 404); return; }
+
+      await query(
+        `INSERT INTO call_delivery_acks (call_id, user_id, device_token, token_type, platform, event)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [callId, userId || null, deviceToken, tokenType, platform, event]
+      );
+      console.log(`[HTTP] Delivery ack: call=${callId} event=${event} platform=${platform}`);
+      json(res, { ok: true, callStatus: callResult.rows[0].status });
+
     } else if (req.method === 'GET' && urlPath === '/debug/status') {
       // Collect all active calls across intercoms
       const calls = {};
