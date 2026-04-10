@@ -232,6 +232,18 @@ async function handleRequest(req, res) {
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [callId, userId || null, deviceToken, tokenType, platform, event]
       );
+
+      // Also update the latest delivery attempt row's state
+      query(
+        `UPDATE call_delivery_attempts
+         SET delivery_state = $1, acked_at = NOW()
+         WHERE call_id = $2 AND device_token = $3 AND attempt_number = (
+           SELECT MAX(attempt_number) FROM call_delivery_attempts
+           WHERE call_id = $2 AND device_token = $3
+         )`,
+        [event, callId, deviceToken]
+      ).catch(e => console.error('[DB] Error updating delivery attempt on ack:', e.message));
+
       console.log(`[HTTP] Delivery ack: call=${callId} event=${event} platform=${platform}`);
       json(res, { ok: true, callStatus: callResult.rows[0].status });
 

@@ -187,6 +187,62 @@ function getPendingRing(apartmentId) {
   return pendingRings.get(apartmentId) || null;
 }
 
+// ---- Startup recovery: restore ringing state from DB after restart ----
+async function recoverActiveCallsFromDB(queryFn) {
+  try {
+    // Mark expired calls as unanswered
+    const expired = await queryFn(
+      "UPDATE calls SET status = 'unanswered', updated_at = NOW() WHERE status = 'calling' AND expires_at <= NOW() RETURNING id"
+    );
+    if (expired.rows.length > 0) {
+      console.log(`[RECOVERY] Marked ${expired.rows.length} expired call(s) as unanswered`);
+      // Also time-out their delivery attempts
+      const expiredIds = expired.rows.map(r => r.id);
+      for (const cid of expiredIds) {
+        queryFn(
+          "UPDATE call_delivery_attempts SET delivery_state = 'timed-out' WHERE call_id = $1 AND delivery_state NOT IN ('accepted', 'declined', 'push-failed')",
+          [cid]
+        ).catch(e => console.error('[RECOVERY] Error timing-out delivery attempts:', e.message));
+      }
+    }
+
+    // Recover still-active calls
+    const active = await queryFn(
+      "SELECT id, building_id, apartment_id, intercom_id, expires_at FROM calls WHERE status = 'calling' AND expires_at > NOW()"
+    );
+    if (active.rows.length === 0) {
+      console.log('[RECOVERY] No active calls to recover');
+      return;
+    }
+
+    for (const call of active.rows) {
+      const remainingMs = new Date(call.expires_at).getTime() - Date.now();
+      if (remainingMs <= 0) continue; // edge case — expired between query and now
+
+      console.log(`[RECOVERY] Restoring call=${call.id} apartment=${call.apartment_id} intercom=${call.intercom_id} (${Math.round(remainingMs / 1000)}s remaining)`);
+
+      // Restore activeCall in-memory state
+      startCall(call.intercom_id, call.apartment_id, 'call', call.id);
+
+      // Restore pendingRing with remaining timeout
+      setPendingRing(call.apartment_id, call.intercom_id, remainingMs, (expiredCall) => {
+        if (expiredCall.callId) {
+          queryFn("UPDATE calls SET status = 'unanswered', updated_at = NOW() WHERE id = $1", [expiredCall.callId])
+            .catch(e => console.error('[DB] recovery ring-expired update calls:', e.message));
+          queryFn(
+            "UPDATE call_delivery_attempts SET delivery_state = 'timed-out' WHERE call_id = $1 AND delivery_state NOT IN ('accepted', 'declined', 'push-failed')",
+            [expiredCall.callId]
+          ).catch(e => console.error('[DB] recovery ring-expired update attempts:', e.message));
+        }
+      });
+    }
+
+    console.log(`[RECOVERY] Restored ${active.rows.length} active call(s)`);
+  } catch (err) {
+    console.error('[RECOVERY] Failed to recover active calls:', err.message);
+  }
+}
+
 // ---- Legacy in-memory token maps (kept for backward compat during transition) ----
 const fcmTokens = new Map();
 const voipTokens = new Map();
@@ -219,6 +275,7 @@ module.exports = {
   getPendingRing,
   startAcceptTimer,
   clearAcceptTimer,
+  recoverActiveCallsFromDB,
   fcmTokens,
   voipTokens,
 };

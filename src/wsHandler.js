@@ -232,8 +232,8 @@ function handleConnection(ws) {
         const callId = uuidv4();
         try {
           await query(
-            "INSERT INTO calls (id, building_id, apartment_id, intercom_id, status) VALUES ($1, $2, $3, $4, 'calling')",
-            [callId, buildingId, targetApartmentId, deviceId]
+            "INSERT INTO calls (id, building_id, apartment_id, intercom_id, status, expires_at) VALUES ($1, $2, $3, $4, 'calling', NOW() + make_interval(secs => $5))",
+            [callId, buildingId, targetApartmentId, deviceId, ringTimeoutSec]
           );
           await query(
             "INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-initiated', $1, $2, $3, $4, 'Ring started by intercom')",
@@ -288,14 +288,23 @@ function handleConnection(ws) {
             const awakeParams = [targetApartmentId, ...sleepingUserIds];
             const placeholders = [...sleepingUserIds].map((_, i) => `$${i + 2}`).join(', ');
             tokenResult = await query(
-              `SELECT token, token_type, platform FROM device_tokens WHERE apartment_id = $1 AND user_id NOT IN (${placeholders})`,
+              `SELECT token, token_type, platform, user_id FROM device_tokens WHERE apartment_id = $1 AND user_id NOT IN (${placeholders})`,
               awakeParams
             );
           } else {
             tokenResult = await query(
-              'SELECT token, token_type, platform FROM device_tokens WHERE apartment_id = $1',
+              'SELECT token, token_type, platform, user_id FROM device_tokens WHERE apartment_id = $1',
               [targetApartmentId]
             );
+          }
+
+          // Insert delivery attempt rows for each device
+          for (const row of tokenResult.rows) {
+            query(
+              `INSERT INTO call_delivery_attempts (call_id, user_id, device_token, token_type, platform, delivery_state)
+               VALUES ($1, $2, $3, $4, $5, 'queued')`,
+              [callId, row.user_id || null, row.token, row.token_type, row.platform || (row.token_type === 'voip' ? 'ios' : 'android')]
+            ).catch(e => console.error(`[${id}] Error inserting delivery attempt:`, e.message));
           }
 
           for (const row of tokenResult.rows) {
@@ -305,8 +314,20 @@ function handleConnection(ws) {
                 .then((result) => {
                   if (result.success) {
                     console.log(`[${id}] VoIP push sent (apartment=${targetApartmentId})`);
+                    query(
+                      `UPDATE call_delivery_attempts SET delivery_state = 'push-sent', last_attempt_at = NOW()
+                       WHERE call_id = $1 AND device_token = $2 AND attempt_number = (
+                         SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
+                       )`, [callId, row.token]
+                    ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
                   } else {
                     console.error(`[${id}] VoIP push failed: ${result.reason}`);
+                    query(
+                      `UPDATE call_delivery_attempts SET delivery_state = 'push-failed', last_error = $3, last_attempt_at = NOW()
+                       WHERE call_id = $1 AND device_token = $2 AND attempt_number = (
+                         SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
+                       )`, [callId, row.token, result.reason]
+                    ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
                     if (result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') {
                       query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'voip'", [row.token])
                         .then(() => console.log(`[${id}] Deleted stale VoIP token`))
@@ -327,9 +348,23 @@ function handleConnection(ws) {
                 },
                 android: { priority: 'high', ttl: ringTimeoutMs },
               })
-                .then(() => console.log(`[${id}] FCM push sent (apartment=${targetApartmentId}, platform=${row.platform})`))
+                .then(() => {
+                  console.log(`[${id}] FCM push sent (apartment=${targetApartmentId}, platform=${row.platform})`);
+                  query(
+                    `UPDATE call_delivery_attempts SET delivery_state = 'push-sent', last_attempt_at = NOW()
+                     WHERE call_id = $1 AND device_token = $2 AND attempt_number = (
+                       SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
+                     )`, [callId, row.token]
+                  ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
+                })
                 .catch((err) => {
                   console.error(`[${id}] FCM push failed:`, err.message);
+                  query(
+                    `UPDATE call_delivery_attempts SET delivery_state = 'push-failed', last_error = $3, last_attempt_at = NOW()
+                     WHERE call_id = $1 AND device_token = $2 AND attempt_number = (
+                       SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
+                     )`, [callId, row.token, err.message]
+                  ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
                   if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
                     query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'fcm'", [row.token])
                       .then(() => console.log(`[${id}] Deleted stale FCM token`))

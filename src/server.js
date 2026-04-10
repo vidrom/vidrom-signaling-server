@@ -5,8 +5,9 @@ const os = require('os');
 const serviceAccount = require('../service-account.json');
 const { handleRequest } = require('./httpRoutes');
 const { handleConnection } = require('./wsHandler');
-const { testConnection } = require('./db');
+const { testConnection, query } = require('./db');
 const { initAPNs } = require('./apnsService');
+const { recoverActiveCallsFromDB } = require('./connectionState');
 
 // Initialize Firebase Admin SDK
 admin.initializeApp({
@@ -48,4 +49,5 @@ httpServer.listen(PORT, async () => {
   console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
   await testConnection();
   initAPNs();
+  await recoverActiveCallsFromDB(query);
 });
