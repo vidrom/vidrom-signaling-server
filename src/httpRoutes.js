@@ -2,9 +2,10 @@
 // Portal APIs (/api/admin/*, /api/management/*) have moved to Lambda (see ../lambda/)
 // Portal HTML (admin.html, management.html) served from S3+CloudFront (see ../portals/)
 const { generateDeviceToken, verifyToken } = require('./auth');
-const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getIntercomForBuilding, clearPendingRing, isPendingRing, sendToApartment } = require('./connectionState');
-const { isAPNsReady } = require('./apnsService');
+const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getIntercomForBuilding, getHomeClients, clearPendingRing, isPendingRing, sendToApartment, startAcceptTimer, clearAcceptTimer } = require('./connectionState');
+const { isAPNsReady, sendVoipPush } = require('./apnsService');
 const { query } = require('./db');
+const admin = require('firebase-admin');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -305,6 +306,147 @@ async function handleRequest(req, res) {
       if (!intercom || !intercom.door_code) { json(res, { valid: false }, 200); return; }
       const valid = intercom.door_code === code;
       json(res, { valid, ...(valid ? {} : { expected: intercom.door_code }) });
+
+    } else if (req.method === 'POST' && urlPath.startsWith('/api/home/calls/') && urlPath.endsWith('/accept')) {
+      // ---- A6: HTTP accept — reserve the call before WS connects ----
+      const parts = urlPath.split('/');
+      const callId = parts[4]; // /api/home/calls/:callId/accept
+      if (!callId) { json(res, { error: 'callId required' }, 400); return; }
+
+      const body = await readBody(req);
+      const { userId } = body;
+      if (!userId) { json(res, { error: 'userId required' }, 400); return; }
+
+      // Look up current call status
+      const callResult = await query('SELECT id, status, apartment_id, intercom_id, building_id FROM calls WHERE id = $1', [callId]);
+      if (callResult.rows.length === 0) { json(res, { error: 'Call not found' }, 404); return; }
+      const callRow = callResult.rows[0];
+
+      // If not in 'calling' status, return current status so app knows immediately
+      if (callRow.status !== 'calling') {
+        const mapped = callRow.status === 'accepted' ? 'call-taken' : callRow.status;
+        json(res, { status: mapped, callId });
+        return;
+      }
+
+      // Atomically claim the call
+      const updateResult = await query(
+        "UPDATE calls SET status = 'accepted', updated_at = NOW() WHERE id = $1 AND status = 'calling' RETURNING *",
+        [callId]
+      );
+      if (updateResult.rows.length === 0) {
+        // Race lost — re-read status
+        const recheck = await query('SELECT status FROM calls WHERE id = $1', [callId]);
+        const mapped = recheck.rows[0]?.status === 'accepted' ? 'call-taken' : (recheck.rows[0]?.status || 'ended');
+        json(res, { status: mapped, callId });
+        return;
+      }
+
+      console.log(`[HTTP] Call ${callId} accepted via HTTP by user=${userId}`);
+
+      // Audit log
+      query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-accepted', $1, $2, $3, $4, 'Call accepted via HTTP')",
+        [callRow.building_id, callRow.apartment_id, callRow.intercom_id, callId]
+      ).catch(e => console.error('[DB] http-accept audit_log:', e.message));
+
+      // Update in-memory state
+      const httpAccepted = activeCall.httpAccept(callRow.intercom_id, userId);
+      if (httpAccepted) {
+        clearPendingRing(callRow.apartment_id);
+      }
+
+      // Notify intercom WS that the call was accepted
+      const intercom = getIntercom(callRow.intercom_id);
+      if (intercom && intercom.ws.readyState === 1) {
+        intercom.ws.send(JSON.stringify({ type: 'accept', callId }));
+      }
+
+      // Send call-taken to all connected home WS clients
+      const aptClients = getHomeClients(callRow.apartment_id);
+      for (const [, entry] of aptClients) {
+        if (entry.ws.readyState === 1) {
+          entry.ws.send(JSON.stringify({ type: 'call-taken', callId }));
+        }
+      }
+
+      // Send call-taken push to all registered tokens for the apartment
+      try {
+        const tokenResult = await query(
+          'SELECT token, token_type FROM device_tokens WHERE apartment_id = $1',
+          [callRow.apartment_id]
+        );
+        for (const row of tokenResult.rows) {
+          if (row.token_type === 'voip' && isAPNsReady()) {
+            sendVoipPush(row.token, 'call-taken', { type: 'call-taken', callId })
+              .catch(err => console.error('[HTTP] call-taken VoIP push error:', err.message));
+          } else if (row.token_type === 'fcm') {
+            admin.messaging().send({
+              token: row.token,
+              data: { type: 'call-taken', callId },
+              android: { priority: 'high' },
+            }).catch(err => console.error('[HTTP] call-taken FCM error:', err.message));
+          }
+        }
+      } catch (err) {
+        console.error('[HTTP] Error sending call-taken push:', err.message);
+      }
+
+      // Start accept reservation timer (10s) — if device doesn't send offer via WS, revert
+      startAcceptTimer(callId, 10_000, async () => {
+        console.log(`[HTTP] Accept reservation expired for call=${callId}, reverting to calling`);
+        // Revert DB
+        const revertResult = await query(
+          "UPDATE calls SET status = 'calling', updated_at = NOW() WHERE id = $1 AND status = 'accepted' RETURNING *",
+          [callId]
+        ).catch(e => { console.error('[DB] accept-timeout revert:', e.message); return { rows: [] }; });
+        if (revertResult.rows.length === 0) return; // call already ended/changed
+
+        // Audit log
+        query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('accept-timeout', $1, $2, $3, $4, 'HTTP accept reservation expired — device did not connect')",
+          [callRow.building_id, callRow.apartment_id, callRow.intercom_id, callId]
+        ).catch(e => console.error('[DB] accept-timeout audit_log:', e.message));
+
+        // Clear in-memory accept
+        const call = activeCall.get(callRow.intercom_id);
+        if (call && call.httpAcceptedBy === userId) {
+          call.acceptedBy = null;
+          call.acceptedWs = null;
+          call.httpAcceptedBy = null;
+        }
+
+        // Notify intercom that accept lapsed
+        const ic = getIntercom(callRow.intercom_id);
+        if (ic && ic.ws.readyState === 1) {
+          ic.ws.send(JSON.stringify({ type: 'accept-timeout', callId }));
+        }
+
+        // Re-ring all home devices (WS)
+        sendToApartment(callRow.apartment_id, { type: 'ring', callId });
+
+        // Re-send push notifications
+        try {
+          const tokenResult = await query(
+            'SELECT token, token_type, platform FROM device_tokens WHERE apartment_id = $1',
+            [callRow.apartment_id]
+          );
+          for (const row of tokenResult.rows) {
+            if (row.token_type === 'voip' && isAPNsReady()) {
+              sendVoipPush(row.token, 'Intercom', { callerName: 'Intercom', type: 'incoming-call', callId })
+                .catch(err => console.error('[HTTP] re-ring VoIP push error:', err.message));
+            } else if (row.token_type === 'fcm') {
+              admin.messaging().send({
+                token: row.token,
+                data: { type: 'incoming-call', callerName: 'Intercom', apartmentId: callRow.apartment_id, callId },
+                android: { priority: 'high' },
+              }).catch(err => console.error('[HTTP] re-ring FCM error:', err.message));
+            }
+          }
+        } catch (err) {
+          console.error('[HTTP] Error re-ringing after accept timeout:', err.message);
+        }
+      });
+
+      json(res, { status: 'accepted', callId });
 
     } else {
       res.writeHead(404);

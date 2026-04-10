@@ -16,6 +16,7 @@ const {
   addIntercom, removeIntercom, getIntercom, getIntercomForBuilding,
   addHomeClient, removeHomeClient, getHomeClients, sendToApartment,
   activeCall, activeCalls, setPendingRing, clearPendingRing, isPendingRing, getPendingRing,
+  clearAcceptTimer,
 } = require('./connectionState');
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
@@ -314,6 +315,22 @@ function handleConnection(ws) {
           break;
         }
 
+        // Check if this call was already HTTP-accepted by this same user
+        const wsUserId = message.userId || null;
+        const httpAlreadyAccepted = call.httpAcceptedBy && wsUserId && call.httpAcceptedBy === wsUserId;
+
+        if (httpAlreadyAccepted) {
+          // Same device that HTTP-accepted — upgrade the in-memory state with WS refs
+          intercomDeviceId = targetIntercom;
+          call.acceptedBy = id;
+          call.acceptedWs = ws;
+          startCallDurationTimer(targetIntercom);
+          // Cancel accept reservation timer — device connected successfully
+          if (call.callId) clearAcceptTimer(call.callId);
+          console.log(`[${id}] WS accept reconciled with prior HTTP accept (user=${wsUserId})`);
+          break;
+        }
+
         const accepted = activeCall.accept(targetIntercom, id, ws);
         if (accepted) {
           // Update this home client's intercom target
@@ -441,6 +458,11 @@ function handleConnection(ws) {
       case 'offer': {
         // WebRTC SDP offer — route based on role
         if (role === 'home') {
+          // Cancel accept reservation timer — device is connected and sending offer
+          const offerCall = intercomDeviceId ? activeCall.get(intercomDeviceId)
+            : (apartmentId ? activeCall.getByApartment(apartmentId) : null);
+          if (offerCall && offerCall.callId) clearAcceptTimer(offerCall.callId);
+
           // Home → Intercom (route to the correct intercom for this building)
           const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
           if (intercom && intercom.ws.readyState === 1) {

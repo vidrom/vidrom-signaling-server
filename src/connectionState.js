@@ -113,6 +113,36 @@ function acceptCall(intercomDeviceId, connId, ws) {
   return true;
 }
 
+// HTTP-based accept: mark the call as accepted with a userId (before WS connects)
+function httpAcceptCall(intercomDeviceId, userId) {
+  const call = activeCalls.get(intercomDeviceId);
+  if (!call) return false;
+  if (call.acceptedBy) return false;
+  call.acceptedBy = `http:${userId}`;
+  call.httpAcceptedBy = userId;
+  return true;
+}
+
+// ---- Accept reservation timer (HTTP accept must be followed by WS offer) ----
+const acceptTimers = new Map(); // callId → timeout
+
+function startAcceptTimer(callId, timeoutMs, onExpired) {
+  clearAcceptTimer(callId);
+  const timer = setTimeout(() => {
+    acceptTimers.delete(callId);
+    if (onExpired) onExpired();
+  }, timeoutMs);
+  acceptTimers.set(callId, timer);
+}
+
+function clearAcceptTimer(callId) {
+  const timer = acceptTimers.get(callId);
+  if (timer) {
+    clearTimeout(timer);
+    acceptTimers.delete(callId);
+  }
+}
+
 function declineCall(intercomDeviceId, connId) {
   const call = activeCalls.get(intercomDeviceId);
   if (!call) return;
@@ -178,6 +208,7 @@ module.exports = {
     get: getActiveCall,
     getByApartment: getActiveCallByApartment,
     accept: acceptCall,
+    httpAccept: httpAcceptCall,
     decline: declineCall,
     clear: clearCall,
   },
@@ -186,6 +217,8 @@ module.exports = {
   clearPendingRing,
   isPendingRing,
   getPendingRing,
+  startAcceptTimer,
+  clearAcceptTimer,
   fcmTokens,
   voipTokens,
 };
