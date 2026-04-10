@@ -20,6 +20,7 @@ const {
 } = require('./connectionState');
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
+const { startRetries, cancelRetries } = require('./retryOrchestrator');
 
 // ---- Max-call-duration safety net (auto-hangup after 60s) ----
 const MAX_CALL_DURATION_MS = 60_000;
@@ -35,6 +36,7 @@ function startCallDurationTimer(intercomDeviceId) {
 
     // Update DB: mark call as ended
     if (call.callId) {
+      cancelRetries(call.callId);
       query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] timeout update calls:', e.message));
       query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by max duration timeout')", [call.callId, call.apartmentId, intercomDeviceId]).catch(e => console.error('[DB] timeout audit_log:', e.message));
     }
@@ -269,8 +271,9 @@ function handleConnection(ws) {
         console.log(`[${id}] Ring timeout for apartment=${targetApartmentId}: ${ringTimeoutSec}s`);
 
         setPendingRing(targetApartmentId, deviceId, ringTimeoutMs, (expiredCall) => {
-          // Ring expired — update DB
+          // Ring expired — cancel retries and update DB
           if (expiredCall.callId) {
+            cancelRetries(expiredCall.callId);
             query("UPDATE calls SET status = 'unanswered', updated_at = NOW() WHERE id = $1", [expiredCall.callId]).catch(e => console.error('[DB] ring-expired update calls:', e.message));
             query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-unanswered', $1, $2, $3, $4, 'Ring expired with no answer')", [buildingId, targetApartmentId, deviceId, expiredCall.callId]).catch(e => console.error('[DB] ring-expired audit_log:', e.message));
           }
@@ -376,6 +379,9 @@ function handleConnection(ws) {
 
           if (tokenResult.rows.length === 0) {
             console.log(`[${id}] No push tokens found for apartment=${targetApartmentId}`);
+          } else {
+            // Start retry orchestration for unacked devices
+            startRetries(callId, ringTimeoutSec);
           }
         } catch (err) {
           console.error(`[${id}] Error querying device tokens:`, err.message);
@@ -420,6 +426,7 @@ function handleConnection(ws) {
           // This resident won the race — relay accept to intercom
           clearPendingRing(call.apartmentId);
           startCallDurationTimer(targetIntercom);
+          if (call.callId) cancelRetries(call.callId);
 
           // Update DB: call accepted
           if (call.callId) {
@@ -520,6 +527,7 @@ function handleConnection(ws) {
           // Everyone declined — relay to intercom
           clearPendingRing(call.apartmentId);
           clearCallDurationTimer(targetIntercom);
+          if (call.callId) cancelRetries(call.callId);
 
           // Update DB: all rejected
           if (call.callId) {
@@ -636,6 +644,7 @@ function handleConnection(ws) {
           if (call) {
             // Update DB: call ended (door opened)
             if (call.callId) {
+              cancelRetries(call.callId);
               query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] open-door update calls:', e.message));
               query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended after door open')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] open-door audit_log:', e.message));
             }
@@ -655,6 +664,7 @@ function handleConnection(ws) {
           if (call) {
             clearPendingRing(call.apartmentId);
             clearCallDurationTimer(deviceId);
+            if (call.callId) cancelRetries(call.callId);
 
             // Update DB: call ended
             if (call.callId) {
@@ -690,6 +700,7 @@ function handleConnection(ws) {
 
               // Update DB: call ended
               if (call.callId) {
+                cancelRetries(call.callId);
                 query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] hangup update calls:', e.message));
                 query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by home hangup')", [call.callId, call.apartmentId, targetIntercom]).catch(e => console.error('[DB] hangup audit_log:', e.message));
               }
@@ -815,6 +826,7 @@ function handleConnection(ws) {
 
           // Update DB: call ended due to intercom disconnect
           if (call.callId) {
+            cancelRetries(call.callId);
             query("UPDATE calls SET status = 'ended', ended_at = NOW(), updated_at = NOW() WHERE id = $1", [call.callId]).catch(e => console.error('[DB] intercom-disconnect update calls:', e.message));
             query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-ended', (SELECT building_id FROM calls WHERE id = $1), $2, $3, $1, 'Call ended by intercom disconnect')", [call.callId, call.apartmentId, deviceId]).catch(e => console.error('[DB] intercom-disconnect audit_log:', e.message));
           }

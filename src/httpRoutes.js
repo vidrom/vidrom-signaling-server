@@ -5,6 +5,7 @@ const { generateDeviceToken, verifyToken } = require('./auth');
 const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getIntercomForBuilding, getHomeClients, clearPendingRing, isPendingRing, sendToApartment, startAcceptTimer, clearAcceptTimer } = require('./connectionState');
 const { isAPNsReady, sendVoipPush } = require('./apnsService');
 const { query } = require('./db');
+const { cancelRetries } = require('./retryOrchestrator');
 const admin = require('firebase-admin');
 
 // Helper to read JSON body from request
@@ -365,6 +366,7 @@ async function handleRequest(req, res) {
       const httpAccepted = activeCall.httpAccept(callRow.intercom_id, userId);
       if (httpAccepted) {
         clearPendingRing(callRow.apartment_id);
+        cancelRetries(callId);
       }
 
       // Notify intercom WS that the call was accepted
