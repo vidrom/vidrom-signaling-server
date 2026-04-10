@@ -182,6 +182,42 @@ function handleConnection(ws) {
 
         console.log(`[${id}] Ring for apartment=${targetApartmentId} from intercom=${deviceId}`);
 
+        // ---- Sleep mode check ----
+        let sleepingUserIds = new Set();
+        let allResidentsSleeping = false;
+        try {
+          const sleepResult = await query(
+            'SELECT u.id, u.sleep_mode FROM users u JOIN apartment_residents ar ON ar.user_id = u.id WHERE ar.apartment_id = $1',
+            [targetApartmentId]
+          );
+          if (sleepResult.rows.length > 0) {
+            for (const row of sleepResult.rows) {
+              if (row.sleep_mode) sleepingUserIds.add(row.id);
+            }
+            allResidentsSleeping = sleepingUserIds.size === sleepResult.rows.length;
+          }
+        } catch (err) {
+          console.error(`[${id}] Error querying sleep mode:`, err.message);
+        }
+
+        if (allResidentsSleeping) {
+          console.log(`[${id}] All residents sleeping for apartment=${targetApartmentId}, skipping ring`);
+          ws.send(JSON.stringify({ type: 'apartment-unavailable', reason: 'all-residents-sleeping', apartmentId: targetApartmentId }));
+          query(
+            "INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, description) VALUES ('ring-skipped-sleep-mode', $1, $2, $3, 'Ring skipped — all residents have sleep mode enabled')",
+            [buildingId, targetApartmentId, deviceId]
+          ).catch(e => console.error('[DB] sleep-mode audit_log:', e.message));
+          break;
+        }
+
+        if (sleepingUserIds.size > 0) {
+          console.log(`[${id}] ${sleepingUserIds.size} resident(s) sleeping — will filter push tokens`);
+          query(
+            "INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, description) VALUES ('ring-skipped-sleep-mode', $1, $2, $3, $4)",
+            [buildingId, targetApartmentId, deviceId, `Ring delivery filtered — ${sleepingUserIds.size} resident(s) in sleep mode`]
+          ).catch(e => console.error('[DB] sleep-mode partial audit_log:', e.message));
+        }
+
         // If a watch session is active on this intercom, end it first — calls take priority
         const prevCall = activeCall.get(deviceId);
         if (prevCall && prevCall.type === 'watch') {
@@ -245,11 +281,22 @@ function handleConnection(ws) {
         console.log(`[${id}] Ring sent to ${wsSent} connected home client(s)`);
 
         // 2. Send push notifications to all registered devices for this apartment (from DB)
+        //    Filter out sleeping users if any
         try {
-          const tokenResult = await query(
-            'SELECT token, token_type, platform FROM device_tokens WHERE apartment_id = $1',
-            [targetApartmentId]
-          );
+          let tokenResult;
+          if (sleepingUserIds.size > 0) {
+            const awakeParams = [targetApartmentId, ...sleepingUserIds];
+            const placeholders = [...sleepingUserIds].map((_, i) => `$${i + 2}`).join(', ');
+            tokenResult = await query(
+              `SELECT token, token_type, platform FROM device_tokens WHERE apartment_id = $1 AND user_id NOT IN (${placeholders})`,
+              awakeParams
+            );
+          } else {
+            tokenResult = await query(
+              'SELECT token, token_type, platform FROM device_tokens WHERE apartment_id = $1',
+              [targetApartmentId]
+            );
+          }
 
           for (const row of tokenResult.rows) {
             if (row.token_type === 'voip' && isAPNsReady()) {
