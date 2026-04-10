@@ -287,6 +287,93 @@ async function listAuditLogs(buildingIds, queryParams) {
   return result.rows;
 }
 
+// ═══════════════════════════════════════════════════════════
+// Delivery Health (read-only)
+// ═══════════════════════════════════════════════════════════
+
+async function getDeliveryHealth(buildingIds, queryParams) {
+  if (buildingIds.length === 0) return { recent_calls: [], delivery_rate: null, avg_latency: null, failed_deliveries: [], unhealthy_apartments: [] };
+
+  // Recent calls with delivery breakdown
+  const recentCalls = await query(
+    `SELECT cds.call_id, cds.building_id, cds.apartment_id, cds.call_status,
+            cds.call_started_at, cds.call_ended_at,
+            cds.devices_targeted, cds.devices_acked, cds.devices_failed,
+            cds.devices_timed_out, cds.devices_skipped_sleep, cds.max_retries,
+            cds.first_ack_latency_sec,
+            b.name AS building_name, a.number AS apartment_number
+     FROM call_delivery_summary cds
+     JOIN buildings b ON cds.building_id = b.id
+     LEFT JOIN apartments a ON cds.apartment_id = a.id
+     WHERE cds.building_id = ANY($1::uuid[])
+     ORDER BY cds.call_started_at DESC LIMIT 50`,
+    [buildingIds]
+  );
+
+  // Delivery rate over last 7 days
+  const rateResult = await query(
+    `SELECT
+       COUNT(*) AS total_calls,
+       COUNT(*) FILTER (WHERE devices_acked > 0) AS calls_with_ack
+     FROM call_delivery_summary
+     WHERE building_id = ANY($1::uuid[]) AND call_started_at >= NOW() - INTERVAL '7 days'`,
+    [buildingIds]
+  );
+  const rate = rateResult.rows[0];
+  const deliveryRate = rate.total_calls > 0
+    ? Math.round((rate.calls_with_ack / rate.total_calls) * 100)
+    : null;
+
+  // Average ack latency by platform
+  const latencyResult = await query(
+    `SELECT cda.platform,
+            ROUND(AVG(EXTRACT(EPOCH FROM (cdacks.created_at - c.created_at)))::numeric, 2) AS avg_latency_sec
+     FROM call_delivery_acks cdacks
+     JOIN calls c ON cdacks.call_id = c.id
+     JOIN call_delivery_attempts cda ON cda.call_id = cdacks.call_id AND cda.device_token = cdacks.device_token
+     WHERE c.building_id = ANY($1::uuid[])
+       AND c.created_at >= NOW() - INTERVAL '7 days'
+       AND cdacks.event = 'push-received'
+     GROUP BY cda.platform`,
+    [buildingIds]
+  );
+
+  // Failed deliveries grouped by error
+  const failedResult = await query(
+    `SELECT cda.last_error, COUNT(*) AS count
+     FROM call_delivery_attempts cda
+     JOIN calls c ON cda.call_id = c.id
+     WHERE c.building_id = ANY($1::uuid[])
+       AND cda.delivery_state = 'push-failed'
+       AND c.created_at >= NOW() - INTERVAL '7 days'
+     GROUP BY cda.last_error
+     ORDER BY count DESC LIMIT 20`,
+    [buildingIds]
+  );
+
+  // Apartments with no healthy tokens
+  const unhealthyResult = await query(
+    `SELECT a.id, a.number, a.name, b.name AS building_name
+     FROM apartments a
+     JOIN buildings b ON a.building_id = b.id
+     WHERE a.building_id = ANY($1::uuid[])
+       AND NOT EXISTS (
+         SELECT 1 FROM device_tokens dt WHERE dt.apartment_id = a.id
+       )`,
+    [buildingIds]
+  );
+
+  return {
+    recent_calls: recentCalls.rows,
+    delivery_rate: deliveryRate,
+    total_calls_7d: parseInt(rate.total_calls),
+    calls_with_ack_7d: parseInt(rate.calls_with_ack),
+    avg_latency: latencyResult.rows,
+    failed_deliveries: failedResult.rows,
+    unhealthy_apartments: unhealthyResult.rows,
+  };
+}
+
 module.exports = {
   listBuildings, updateBuilding,
   listApartments, createApartment, updateApartment, deleteApartment,
@@ -294,4 +381,5 @@ module.exports = {
   listDevices, createDevice, revokeDevice, reprovisionDevice,
   listNotifications, createNotification, deleteNotification,
   listAuditLogs,
+  getDeliveryHealth,
 };

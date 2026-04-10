@@ -248,6 +248,35 @@ async function handleRequest(req, res) {
       console.log(`[HTTP] Delivery ack: call=${callId} event=${event} platform=${platform}`);
       json(res, { ok: true, callStatus: callResult.rows[0].status });
 
+      // Send ring-progress with confirmed device count to the intercom
+      if (event === 'push-received' || event === 'app-awake' || event === 'incoming-ui-shown') {
+        try {
+          const callInfo = await query(
+            'SELECT intercom_id FROM calls WHERE id = $1', [callId]
+          );
+          if (callInfo.rows.length > 0) {
+            const intercomId = callInfo.rows[0].intercom_id;
+            const intercom = getIntercom(intercomId);
+            if (intercom && intercom.ws.readyState === 1) {
+              const confirmedResult = await query(
+                `SELECT COUNT(DISTINCT device_token) AS confirmed
+                 FROM call_delivery_acks WHERE call_id = $1`,
+                [callId]
+              );
+              const devicesConfirmed = parseInt(confirmedResult.rows[0].confirmed, 10);
+              intercom.ws.send(JSON.stringify({
+                type: 'ring-progress',
+                callId,
+                devicesConfirmed,
+              }));
+              console.log(`[HTTP] Sent ring-progress devicesConfirmed=${devicesConfirmed} to intercom=${intercomId}`);
+            }
+          }
+        } catch (e) {
+          console.error('[HTTP] Error sending ring-progress on ack:', e.message);
+        }
+      }
+
     } else if (req.method === 'GET' && urlPath === '/debug/status') {
       // Collect all active calls across intercoms
       const calls = {};

@@ -382,6 +382,13 @@ function handleConnection(ws) {
           } else {
             // Start retry orchestration for unacked devices
             startRetries(callId, ringTimeoutSec);
+
+            // Send ring-progress to intercom: how many devices were notified
+            ws.send(JSON.stringify({
+              type: 'ring-progress',
+              callId,
+              devicesNotified: tokenResult.rows.length,
+            }));
           }
         } catch (err) {
           console.error(`[${id}] Error querying device tokens:`, err.message);

@@ -415,6 +415,71 @@ async function updateSetting(key, body) {
   return result.rows[0];
 }
 
+// ═══════════════════════════════════════════════════════════
+// System Delivery Health
+// ═══════════════════════════════════════════════════════════
+
+async function getSystemDeliveryHealth() {
+  // Delivery rate by building (last 7 days)
+  const rateByBuilding = await query(
+    `SELECT b.id AS building_id, b.name AS building_name,
+            COUNT(*) AS total_calls,
+            COUNT(*) FILTER (WHERE cds.devices_acked > 0) AS calls_with_ack
+     FROM call_delivery_summary cds
+     JOIN buildings b ON cds.building_id = b.id
+     WHERE cds.call_started_at >= NOW() - INTERVAL '7 days'
+     GROUP BY b.id, b.name
+     ORDER BY b.name`
+  );
+
+  // Token health
+  const tokenHealth = await query(
+    `SELECT
+       COUNT(*) AS total_tokens,
+       COUNT(*) FILTER (WHERE dt.created_at < NOW() - INTERVAL '30 days') AS stale_tokens
+     FROM device_tokens dt`
+  );
+
+  // Calls with delivery-degraded audit events
+  const degradedResult = await query(
+    `SELECT al.*, b.name AS building_name
+     FROM audit_logs al
+     LEFT JOIN buildings b ON al.building_id = b.id
+     WHERE al.event_type = 'delivery-degraded'
+       AND al.created_at >= NOW() - INTERVAL '7 days'
+     ORDER BY al.created_at DESC LIMIT 50`
+  );
+
+  // Retry effectiveness: % of retried devices that eventually acked
+  const retryResult = await query(
+    `SELECT
+       COUNT(DISTINCT (cda.call_id, cda.device_token)) FILTER (WHERE cda.attempt_number > 1) AS retried_devices,
+       COUNT(DISTINCT (cda.call_id, cda.device_token)) FILTER (
+         WHERE cda.attempt_number > 1 AND cda.delivery_state IN ('push-received', 'app-awake', 'incoming-ui-shown', 'accepted')
+       ) AS retried_and_acked
+     FROM call_delivery_attempts cda
+     JOIN calls c ON cda.call_id = c.id
+     WHERE c.created_at >= NOW() - INTERVAL '7 days'`
+  );
+  const retry = retryResult.rows[0];
+
+  return {
+    rate_by_building: rateByBuilding.rows.map(r => ({
+      ...r,
+      delivery_rate: r.total_calls > 0 ? Math.round((r.calls_with_ack / r.total_calls) * 100) : null,
+    })),
+    token_health: tokenHealth.rows[0],
+    degraded_calls: degradedResult.rows,
+    retry_effectiveness: {
+      retried_devices: parseInt(retry.retried_devices),
+      retried_and_acked: parseInt(retry.retried_and_acked),
+      effectiveness_pct: retry.retried_devices > 0
+        ? Math.round((retry.retried_and_acked / retry.retried_devices) * 100)
+        : null,
+    },
+  };
+}
+
 module.exports = {
   listBuildings, createBuilding, updateBuilding, deleteBuilding,
   listApartments, createApartment, updateApartment, deleteApartment,
@@ -426,4 +491,5 @@ module.exports = {
   listAuditLogs,
   listClientErrors,
   listSettings, updateSetting,
+  getSystemDeliveryHealth,
 };

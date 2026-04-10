@@ -7,6 +7,7 @@
 const admin = require('firebase-admin');
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
+const { getIntercom } = require('./connectionState');
 
 // callId → { timers: [timeout...], cancelled: boolean }
 const retryState = new Map();
@@ -208,6 +209,17 @@ async function checkDeliveryDegraded(callId) {
         [building_id, apartment_id, intercom_id, callId,
          `No device acknowledged ring for call ${callId} after all retry attempts`]
       ).catch(e => console.error('[RETRY] Error inserting delivery-degraded audit log:', e.message));
+
+      // Send ring-progress noResponse to intercom
+      const intercom = getIntercom(intercom_id);
+      if (intercom && intercom.ws.readyState === 1) {
+        intercom.ws.send(JSON.stringify({
+          type: 'ring-progress',
+          callId,
+          noResponse: true,
+        }));
+        console.log(`[RETRY] Sent ring-progress noResponse to intercom=${intercom_id}`);
+      }
     }
   } catch (err) {
     console.error(`[RETRY] Error checking delivery-degraded for call=${callId}:`, err.message);

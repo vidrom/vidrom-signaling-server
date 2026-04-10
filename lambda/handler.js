@@ -183,6 +183,11 @@ exports.handler = async (event) => {
         return json(200, await adminRoutes.updateSetting(decodeURIComponent(settingMatch[1]), body));
       }
 
+      // --- Delivery Health ---
+      if (method === 'GET' && path === '/api/admin/delivery-health') {
+        return json(200, await adminRoutes.getSystemDeliveryHealth());
+      }
+
       return json(404, { error: 'Not found' });
     }
 
@@ -264,6 +269,11 @@ exports.handler = async (event) => {
       // --- Audit Logs ---
       if (method === 'GET' && path === '/api/management/audit-logs') {
         return json(200, await managementRoutes.listAuditLogs(buildingIds, queryParams));
+      }
+
+      // --- Delivery Health ---
+      if (method === 'GET' && path === '/api/management/delivery-health') {
+        return json(200, await managementRoutes.getDeliveryHealth(buildingIds, queryParams));
       }
 
       return json(404, { error: 'Not found' });

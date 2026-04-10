@@ -126,6 +126,7 @@
       <button class="nav-tab" onclick="showSection('devices')">Intercoms</button>
       <button class="nav-tab" onclick="showSection('notifications')">Notifications</button>
       <button class="nav-tab" onclick="showSection('audit')">Audit Logs</button>
+      <button class="nav-tab" onclick="showSection('delivery-health')">Delivery Health</button>
     </div>
 
     <!-- ═══ Building Settings Section ═══ -->
@@ -192,6 +193,14 @@
           <button class="btn btn-outline" onclick="loadAuditLogs()">Filter</button>
         </div>
         <div id="auditTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Delivery Health Section ═══ -->
+    <div id="sec-delivery-health" class="section">
+      <div class="card">
+        <h2>Delivery Health <button class="refresh-btn" onclick="loadDeliveryHealth()">&#x21bb; Refresh</button></h2>
+        <div id="deliveryHealthContent"><div class="empty-state">Select a building to view delivery health.</div></div>
       </div>
     </div>
   </div>
@@ -325,6 +334,7 @@ function onBuildingChange() {
   loadDevices();
   loadNotifications();
   loadAuditLogs();
+  loadDeliveryHealth();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -666,6 +676,90 @@ function fmtDateTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Delivery Health
+// ═══════════════════════════════════════════════════════════
+async function loadDeliveryHealth() {
+  const container = document.getElementById('deliveryHealthContent');
+  if (!selectedBuildingId) {
+    container.innerHTML = '<div class="empty-state">Select a building to view delivery health.</div>';
+    return;
+  }
+  container.innerHTML = '<div class="spinner"></div> Loading…';
+  const data = await apiCall('/api/management/delivery-health');
+  if (!data) { container.innerHTML = '<div class="empty-state">Failed to load delivery health.</div>'; return; }
+
+  let html = '';
+
+  // Summary cards
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px;">';
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:#0c2461;">${data.delivery_rate !== null ? data.delivery_rate + '%' : '—'}</div>
+    <div style="font-size:13px;color:#636e72;">Delivery Rate (7d)</div>
+  </div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:#0c2461;">${data.total_calls_7d || 0}</div>
+    <div style="font-size:13px;color:#636e72;">Total Calls (7d)</div>
+  </div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:#0c2461;">${data.unhealthy_apartments.length}</div>
+    <div style="font-size:13px;color:#636e72;">Apartments w/o Tokens</div>
+  </div>`;
+  html += '</div>';
+
+  // Avg latency by platform
+  if (data.avg_latency && data.avg_latency.length > 0) {
+    html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">Avg Ack Latency by Platform (7d)</h3>';
+    html += '<table><thead><tr><th>Platform</th><th>Avg Latency (s)</th></tr></thead><tbody>';
+    for (const l of data.avg_latency) {
+      html += `<tr><td>${esc(l.platform)}</td><td>${l.avg_latency_sec}s</td></tr>`;
+    }
+    html += '</tbody></table><br/>';
+  }
+
+  // Failed deliveries
+  if (data.failed_deliveries && data.failed_deliveries.length > 0) {
+    html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">Failed Deliveries by Error (7d)</h3>';
+    html += '<table><thead><tr><th>Error</th><th>Count</th></tr></thead><tbody>';
+    for (const f of data.failed_deliveries) {
+      html += `<tr><td>${esc(f.last_error || 'Unknown')}</td><td>${f.count}</td></tr>`;
+    }
+    html += '</tbody></table><br/>';
+  }
+
+  // Unhealthy apartments
+  if (data.unhealthy_apartments && data.unhealthy_apartments.length > 0) {
+    html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">Apartments with No Device Tokens</h3>';
+    html += '<table><thead><tr><th>Apartment</th><th>Name</th><th>Building</th></tr></thead><tbody>';
+    for (const a of data.unhealthy_apartments) {
+      html += `<tr><td>${esc(a.number)}</td><td>${esc(a.name || '—')}</td><td>${esc(a.building_name)}</td></tr>`;
+    }
+    html += '</tbody></table><br/>';
+  }
+
+  // Recent calls
+  html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">Recent Calls</h3>';
+  if (data.recent_calls.length === 0) {
+    html += '<div class="empty-state">No recent calls.</div>';
+  } else {
+    html += '<table><thead><tr><th>Time</th><th>Apartment</th><th>Status</th><th>Targeted</th><th>Acked</th><th>Failed</th><th>Timed Out</th><th>Latency</th></tr></thead><tbody>';
+    for (const c of data.recent_calls) {
+      const latency = c.first_ack_latency_sec !== null ? c.first_ack_latency_sec.toFixed(1) + 's' : '—';
+      const statusClass = c.call_status === 'answered' ? 'status-connected' : (c.call_status === 'unanswered' ? 'status-disconnected' : '');
+      html += `<tr>
+        <td style="white-space:nowrap;">${fmtDateTime(c.call_started_at)}</td>
+        <td>${esc(c.apartment_number || '—')}</td>
+        <td><span class="status-badge ${statusClass}">${esc(c.call_status)}</span></td>
+        <td>${c.devices_targeted}</td><td>${c.devices_acked}</td><td>${c.devices_failed}</td><td>${c.devices_timed_out}</td>
+        <td>${latency}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  container.innerHTML = html;
 }
 </script>
 </body>

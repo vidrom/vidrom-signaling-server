@@ -118,6 +118,7 @@
       <button class="nav-tab" onclick="showSection('notifications')">Notifications</button>
       <button class="nav-tab" onclick="showSection('audit')">Audit Logs</button>
       <button class="nav-tab" onclick="showSection('errors')">Client Errors</button>
+      <button class="nav-tab" onclick="showSection('delivery-health')">Delivery Health</button>
       <button class="nav-tab" onclick="showSection('settings')">Settings</button>
     </div>
 
@@ -232,6 +233,14 @@
       <div class="card">
         <h2>Global Settings</h2>
         <div id="settingsTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Delivery Health Section ═══ -->
+    <div id="sec-delivery-health" class="section">
+      <div class="card">
+        <h2>System Delivery Health <button class="refresh-btn" onclick="loadDeliveryHealth()">&#x21bb; Refresh</button></h2>
+        <div id="deliveryHealthContent"><div class="empty-state">Loading…</div></div>
       </div>
     </div>
   </div>
@@ -372,6 +381,7 @@ async function loadAll() {
   loadAuditLogs();
   loadClientErrors();
   loadSettings();
+  loadDeliveryHealth();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -960,6 +970,73 @@ function fmtDateTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ═══════════════════════════════════════════════════════════
+// System Delivery Health
+// ═══════════════════════════════════════════════════════════
+async function loadDeliveryHealth() {
+  const container = document.getElementById('deliveryHealthContent');
+  container.innerHTML = '<div class="spinner"></div> Loading…';
+  const data = await apiCall('/api/admin/delivery-health');
+  if (!data) { container.innerHTML = '<div class="empty-state">Failed to load delivery health.</div>'; return; }
+
+  let html = '';
+
+  // Delivery rate by building
+  html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">Delivery Rate by Building (7d)</h3>';
+  if (data.rate_by_building.length === 0) {
+    html += '<div class="empty-state">No call data in the last 7 days.</div>';
+  } else {
+    html += '<table><thead><tr><th>Building</th><th>Total Calls</th><th>Calls Acked</th><th>Delivery Rate</th></tr></thead><tbody>';
+    for (const b of data.rate_by_building) {
+      const rateColor = b.delivery_rate === null ? '' : (b.delivery_rate >= 80 ? 'color:#00b894;' : (b.delivery_rate >= 50 ? 'color:#fdcb6e;' : 'color:#d63031;'));
+      html += `<tr>
+        <td>${esc(b.building_name)}</td>
+        <td>${b.total_calls}</td>
+        <td>${b.calls_with_ack}</td>
+        <td style="font-weight:700;${rateColor}">${b.delivery_rate !== null ? b.delivery_rate + '%' : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table><br/>';
+  }
+
+  // Token health
+  const th = data.token_health;
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px;">';
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:#0984e3;">${th.total_tokens || 0}</div>
+    <div style="font-size:13px;color:#636e72;">Total Tokens</div>
+  </div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:${th.stale_tokens > 0 ? '#d63031' : '#00b894'};">${th.stale_tokens || 0}</div>
+    <div style="font-size:13px;color:#636e72;">Stale Tokens (>30d)</div>
+  </div>`;
+  const re = data.retry_effectiveness;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:28px;font-weight:700;color:#0984e3;">${re.effectiveness_pct !== null ? re.effectiveness_pct + '%' : '—'}</div>
+    <div style="font-size:13px;color:#636e72;">Retry Effectiveness</div>
+    <div style="font-size:11px;color:#b2bec3;">${re.retried_and_acked} / ${re.retried_devices} retried</div>
+  </div>`;
+  html += '</div>';
+
+  // Degraded calls
+  html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">Delivery-Degraded Events (7d)</h3>';
+  if (data.degraded_calls.length === 0) {
+    html += '<div class="empty-state">No delivery-degraded events.</div>';
+  } else {
+    html += '<table><thead><tr><th>Time</th><th>Building</th><th>Description</th></tr></thead><tbody>';
+    for (const d of data.degraded_calls) {
+      html += `<tr>
+        <td style="white-space:nowrap;">${fmtDateTime(d.created_at)}</td>
+        <td>${esc(d.building_name || '—')}</td>
+        <td>${esc(d.description || '—')}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  container.innerHTML = html;
 }
 </script>
 </body>
