@@ -161,11 +161,25 @@ function handleConnection(ws) {
         console.log(`[${id}] Registered as "${role}"`);
         ws.send(JSON.stringify({ type: 'registered', role }));
 
-        // If home just connected and there's a pending ring for their apartment, re-send it
-        if (role === 'home' && apartmentId && isPendingRing(apartmentId)) {
+        // Late-join: if home just connected and there's an active ring or accepted call, notify them
+        if (role === 'home' && apartmentId) {
           const pendingCallInfo = activeCall.getByApartment(apartmentId);
-          console.log(`[${id}] Re-sending pending ring to home (apartment=${apartmentId})`);
-          ws.send(JSON.stringify({ type: 'ring', callId: pendingCallInfo?.callId || null }));
+          if (isPendingRing(apartmentId) && pendingCallInfo) {
+            console.log(`[${id}] Late-join: re-sending pending ring to home (apartment=${apartmentId}, lateJoin=true)`);
+            ws.send(JSON.stringify({ type: 'ring', callId: pendingCallInfo.callId || null, buildingId, apartmentId, lateJoin: true }));
+            query(
+              "INSERT INTO audit_logs (event_type, building_id, apartment_id, call_id, description) VALUES ('late-join-ring', $1, $2, $3, 'Device late-joined active ringing call')",
+              [buildingId, apartmentId, pendingCallInfo.callId || null]
+            ).catch(e => console.error('[DB] late-join audit_log:', e.message));
+          } else if (pendingCallInfo && pendingCallInfo.acceptedBy) {
+            // Call already accepted by another device
+            console.log(`[${id}] Late-join: call already accepted callId=${pendingCallInfo.callId} — sending call-taken (apartment=${apartmentId})`);
+            ws.send(JSON.stringify({ type: 'call-taken', callId: pendingCallInfo.callId || null }));
+            query(
+              "INSERT INTO audit_logs (event_type, building_id, apartment_id, call_id, description) VALUES ('late-join-call-taken', $1, $2, $3, 'Device late-joined but call already accepted')",
+              [buildingId, apartmentId, pendingCallInfo.callId || null]
+            ).catch(e => console.error('[DB] late-join-call-taken audit_log:', e.message));
+          }
         }
         break;
       }
