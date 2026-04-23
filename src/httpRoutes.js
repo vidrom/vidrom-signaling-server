@@ -7,6 +7,7 @@ const { isAPNsReady, sendVoipPush } = require('./apnsService');
 const { query } = require('./db');
 const { cancelRetries } = require('./retryOrchestrator');
 const admin = require('firebase-admin');
+const { computeDeviceHealth } = require('./deviceHealthScore');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -45,6 +46,108 @@ function authenticateDevice(req) {
   } catch {
     return null;
   }
+}
+
+async function upsertDeviceHealthSignal({
+  deviceToken,
+  tokenType,
+  userId,
+  apartmentId,
+  platform,
+  lastTokenRefresh,
+  lastAckAt,
+  lastCallAckEvent,
+}) {
+  if (!deviceToken || !tokenType) return;
+  const existingResult = await query(
+    `SELECT * FROM device_health WHERE device_token = $1 AND token_type = $2 LIMIT 1`,
+    [deviceToken, tokenType]
+  );
+  const existing = existingResult.rows[0] || null;
+
+  const merged = {
+    user_id: userId || existing?.user_id || null,
+    apartment_id: apartmentId || existing?.apartment_id || null,
+    platform: platform || existing?.platform || (tokenType === 'voip' ? 'ios' : 'android'),
+    last_successful_push: existing?.last_successful_push || null,
+    last_push_failure: existing?.last_push_failure || null,
+    last_push_error: existing?.last_push_error || null,
+    last_token_refresh: lastTokenRefresh || existing?.last_token_refresh || null,
+    last_ack_at: lastAckAt || existing?.last_ack_at || null,
+    last_call_ack_event: lastCallAckEvent || existing?.last_call_ack_event || null,
+    notification_permission: existing?.notification_permission || 'unknown',
+    app_version: existing?.app_version || null,
+    os_version: existing?.os_version || null,
+  };
+
+  if (!merged.user_id || !merged.apartment_id || !merged.platform) return;
+
+  let hasAnyAck = !!merged.last_ack_at;
+  if (!hasAnyAck) {
+    const ackResult = await query(
+      `SELECT 1 FROM call_delivery_acks WHERE device_token = $1 LIMIT 1`,
+      [deviceToken]
+    );
+    hasAnyAck = ackResult.rows.length > 0;
+  }
+
+  const { health_score, health_status } = computeDeviceHealth({
+    lastPushFailed: !!merged.last_push_failure,
+    lastAckAt: merged.last_ack_at,
+    notificationPermission: merged.notification_permission,
+    hasAnyAck,
+  });
+
+  await query(
+    `INSERT INTO device_health (
+      device_token, token_type, user_id, apartment_id, platform,
+      last_successful_push, last_push_failure, last_push_error,
+      last_token_refresh, last_ack_at, last_call_ack_event,
+      notification_permission, app_version, os_version,
+      health_score, health_status, last_evaluated_at, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5,
+      $6, $7, $8,
+      $9, $10, $11,
+      $12, $13, $14,
+      $15, $16, NOW(), NOW()
+    )
+    ON CONFLICT (device_token, token_type) DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      apartment_id = EXCLUDED.apartment_id,
+      platform = EXCLUDED.platform,
+      last_successful_push = EXCLUDED.last_successful_push,
+      last_push_failure = EXCLUDED.last_push_failure,
+      last_push_error = EXCLUDED.last_push_error,
+      last_token_refresh = EXCLUDED.last_token_refresh,
+      last_ack_at = EXCLUDED.last_ack_at,
+      last_call_ack_event = EXCLUDED.last_call_ack_event,
+      notification_permission = EXCLUDED.notification_permission,
+      app_version = EXCLUDED.app_version,
+      os_version = EXCLUDED.os_version,
+      health_score = EXCLUDED.health_score,
+      health_status = EXCLUDED.health_status,
+      last_evaluated_at = NOW(),
+      updated_at = NOW()`,
+    [
+      deviceToken,
+      tokenType,
+      merged.user_id,
+      merged.apartment_id,
+      merged.platform,
+      merged.last_successful_push,
+      merged.last_push_failure,
+      merged.last_push_error,
+      merged.last_token_refresh,
+      merged.last_ack_at,
+      merged.last_call_ack_event,
+      merged.notification_permission,
+      merged.app_version,
+      merged.os_version,
+      health_score,
+      health_status,
+    ]
+  );
 }
 
 // Main HTTP request handler — only stateful endpoints that require in-memory connection state
@@ -102,6 +205,14 @@ async function handleRequest(req, res) {
           "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
           [userId, token]
         );
+        await upsertDeviceHealthSignal({
+          deviceToken: token,
+          tokenType: 'fcm',
+          userId,
+          apartmentId,
+          platform: platform || 'android',
+          lastTokenRefresh: new Date(),
+        });
         console.log(`[HTTP] FCM token registered for apartment=${apartmentId} user=${userId}`);
         json(res, { ok: true });
       } else if (role && token) {
@@ -129,6 +240,14 @@ async function handleRequest(req, res) {
           "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'voip' AND token != $2",
           [userId, token]
         );
+        await upsertDeviceHealthSignal({
+          deviceToken: token,
+          tokenType: 'voip',
+          userId,
+          apartmentId,
+          platform: 'ios',
+          lastTokenRefresh: new Date(),
+        });
         console.log(`[HTTP] VoIP token registered for apartment=${apartmentId} user=${userId}`);
         json(res, { ok: true });
       } else if (role && token) {
@@ -233,6 +352,18 @@ async function handleRequest(req, res) {
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [callId, userId || null, deviceToken, tokenType, platform, event]
       );
+
+      const callInfo = await query('SELECT apartment_id FROM calls WHERE id = $1', [callId]);
+      const apartmentId = callInfo.rows[0]?.apartment_id || null;
+      await upsertDeviceHealthSignal({
+        deviceToken,
+        tokenType,
+        userId: userId || null,
+        apartmentId,
+        platform,
+        lastAckAt: new Date(),
+        lastCallAckEvent: event,
+      });
 
       // Also update the latest delivery attempt row's state
       query(

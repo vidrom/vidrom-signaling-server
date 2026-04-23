@@ -118,6 +118,7 @@
       <button class="nav-tab" onclick="showSection('notifications')">Notifications</button>
       <button class="nav-tab" onclick="showSection('audit')">Audit Logs</button>
       <button class="nav-tab" onclick="showSection('errors')">Client Errors</button>
+      <button class="nav-tab" onclick="showSection('device-health')">Device Health</button>
       <button class="nav-tab" onclick="showSection('delivery-health')">Delivery Health</button>
       <button class="nav-tab" onclick="showSection('settings')">Settings</button>
     </div>
@@ -233,6 +234,14 @@
       <div class="card">
         <h2>Global Settings</h2>
         <div id="settingsTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Delivery Health Section ═══ -->
+    <div id="sec-device-health" class="section">
+      <div class="card">
+        <h2>System Device Health <button class="refresh-btn" onclick="loadDeviceHealthSummary()">&#x21bb; Refresh</button></h2>
+        <div id="deviceHealthSummaryContent"><div class="empty-state">Loading…</div></div>
       </div>
     </div>
 
@@ -381,6 +390,7 @@ async function loadAll() {
   loadAuditLogs();
   loadClientErrors();
   loadSettings();
+  loadDeviceHealthSummary();
   loadDeliveryHealth();
 }
 
@@ -970,6 +980,50 @@ function fmtDateTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ═══════════════════════════════════════════════════════════
+// System Device Health
+// ═══════════════════════════════════════════════════════════
+async function loadDeviceHealthSummary() {
+  const container = document.getElementById('deviceHealthSummaryContent');
+  container.innerHTML = '<div class="spinner"></div> Loading…';
+  const data = await apiCall('/api/admin/device-health/summary');
+  if (!data) {
+    container.innerHTML = '<div class="empty-state">Failed to load device health.</div>';
+    return;
+  }
+
+  const t = data.totals || {};
+  let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px;">';
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;"><div style="font-size:28px;font-weight:700;color:#0984e3;">${t.total_devices || 0}</div><div style="font-size:13px;color:#636e72;">Total Devices</div></div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;"><div style="font-size:28px;font-weight:700;color:#00b894;">${t.healthy_devices || 0}</div><div style="font-size:13px;color:#636e72;">Healthy</div></div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;"><div style="font-size:28px;font-weight:700;color:#e1a400;">${t.degraded_devices || 0}</div><div style="font-size:13px;color:#636e72;">Degraded</div></div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;"><div style="font-size:28px;font-weight:700;color:#d63031;">${t.unhealthy_devices || 0}</div><div style="font-size:13px;color:#636e72;">Unhealthy</div></div>`;
+  html += `<div style="background:#f1f2f6;border-radius:8px;padding:16px;text-align:center;"><div style="font-size:28px;font-weight:700;color:#d63031;">${t.critical_apartments || 0}</div><div style="font-size:13px;color:#636e72;">Critical Apartments</div></div>`;
+  html += '</div>';
+
+  const byBuilding = data.by_building || [];
+  html += '<h3 style="font-size:14px;color:#636e72;margin-bottom:8px;text-transform:uppercase;">By Building</h3>';
+  if (byBuilding.length === 0) {
+    html += '<div class="empty-state">No device health data yet.</div>';
+  } else {
+    html += '<table><thead><tr><th>Building</th><th>Apartments</th><th>Critical</th><th>Total Devices</th><th>Healthy</th><th>Degraded</th><th>Unhealthy</th></tr></thead><tbody>';
+    for (const b of byBuilding) {
+      html += `<tr>
+        <td>${esc(b.building_name)}</td>
+        <td>${b.apartments}</td>
+        <td style="font-weight:700;${b.critical_apartments > 0 ? 'color:#d63031;' : 'color:#00b894;'}">${b.critical_apartments}</td>
+        <td>${b.total_devices || 0}</td>
+        <td>${b.healthy_devices || 0}</td>
+        <td>${b.degraded_devices || 0}</td>
+        <td>${b.unhealthy_devices || 0}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  container.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════════════════

@@ -21,10 +21,122 @@ const {
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
 const { startRetries, cancelRetries } = require('./retryOrchestrator');
+const { computeDeviceHealth } = require('./deviceHealthScore');
 
 // ---- Max-call-duration safety net (auto-hangup after 60s) ----
 const MAX_CALL_DURATION_MS = 60_000;
 const callDurationTimers = new Map(); // intercomDeviceId → timeout
+
+async function upsertDeviceHealthSignal({
+  deviceToken,
+  tokenType,
+  userId,
+  apartmentId,
+  platform,
+  lastSuccessfulPush,
+  lastPushFailure,
+  lastPushError,
+  lastTokenRefresh,
+  lastAckAt,
+  lastCallAckEvent,
+  notificationPermission,
+  appVersion,
+  osVersion,
+}) {
+  if (!deviceToken || !tokenType) return;
+
+  const existingResult = await query(
+    `SELECT * FROM device_health WHERE device_token = $1 AND token_type = $2 LIMIT 1`,
+    [deviceToken, tokenType]
+  );
+  const existing = existingResult.rows[0] || null;
+
+  const merged = {
+    user_id: userId || existing?.user_id || null,
+    apartment_id: apartmentId || existing?.apartment_id || null,
+    platform: platform || existing?.platform || (tokenType === 'voip' ? 'ios' : 'android'),
+    last_successful_push: lastSuccessfulPush !== undefined ? lastSuccessfulPush : (existing?.last_successful_push || null),
+    last_push_failure: lastPushFailure !== undefined ? lastPushFailure : (existing?.last_push_failure || null),
+    last_push_error: lastPushError !== undefined ? lastPushError : (existing?.last_push_error || null),
+    last_token_refresh: lastTokenRefresh !== undefined ? lastTokenRefresh : (existing?.last_token_refresh || null),
+    last_ack_at: lastAckAt !== undefined ? lastAckAt : (existing?.last_ack_at || null),
+    last_call_ack_event: lastCallAckEvent !== undefined ? lastCallAckEvent : (existing?.last_call_ack_event || null),
+    notification_permission: notificationPermission !== undefined ? notificationPermission : (existing?.notification_permission || 'unknown'),
+    app_version: appVersion !== undefined ? appVersion : (existing?.app_version || null),
+    os_version: osVersion !== undefined ? osVersion : (existing?.os_version || null),
+  };
+
+  if (!merged.user_id || !merged.apartment_id || !merged.platform) {
+    return;
+  }
+
+  let hasAnyAck = !!merged.last_ack_at;
+  if (!hasAnyAck) {
+    const ackResult = await query(
+      `SELECT 1 FROM call_delivery_acks WHERE device_token = $1 LIMIT 1`,
+      [deviceToken]
+    );
+    hasAnyAck = ackResult.rows.length > 0;
+  }
+
+  const { health_score, health_status } = computeDeviceHealth({
+    lastPushFailed: !!merged.last_push_failure,
+    lastAckAt: merged.last_ack_at,
+    notificationPermission: merged.notification_permission,
+    hasAnyAck,
+  });
+
+  await query(
+    `INSERT INTO device_health (
+      device_token, token_type, user_id, apartment_id, platform,
+      last_successful_push, last_push_failure, last_push_error,
+      last_token_refresh, last_ack_at, last_call_ack_event,
+      notification_permission, app_version, os_version,
+      health_score, health_status, last_evaluated_at, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5,
+      $6, $7, $8,
+      $9, $10, $11,
+      $12, $13, $14,
+      $15, $16, NOW(), NOW()
+    )
+    ON CONFLICT (device_token, token_type) DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      apartment_id = EXCLUDED.apartment_id,
+      platform = EXCLUDED.platform,
+      last_successful_push = EXCLUDED.last_successful_push,
+      last_push_failure = EXCLUDED.last_push_failure,
+      last_push_error = EXCLUDED.last_push_error,
+      last_token_refresh = EXCLUDED.last_token_refresh,
+      last_ack_at = EXCLUDED.last_ack_at,
+      last_call_ack_event = EXCLUDED.last_call_ack_event,
+      notification_permission = EXCLUDED.notification_permission,
+      app_version = EXCLUDED.app_version,
+      os_version = EXCLUDED.os_version,
+      health_score = EXCLUDED.health_score,
+      health_status = EXCLUDED.health_status,
+      last_evaluated_at = NOW(),
+      updated_at = NOW()`,
+    [
+      deviceToken,
+      tokenType,
+      merged.user_id,
+      merged.apartment_id,
+      merged.platform,
+      merged.last_successful_push,
+      merged.last_push_failure,
+      merged.last_push_error,
+      merged.last_token_refresh,
+      merged.last_ack_at,
+      merged.last_call_ack_event,
+      merged.notification_permission,
+      merged.app_version,
+      merged.os_version,
+      health_score,
+      health_status,
+    ]
+  );
+}
 
 function startCallDurationTimer(intercomDeviceId) {
   clearCallDurationTimer(intercomDeviceId);
@@ -337,6 +449,16 @@ function handleConnection(ws) {
                          SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
                        )`, [callId, row.token]
                     ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
+                    upsertDeviceHealthSignal({
+                      deviceToken: row.token,
+                      tokenType: row.token_type,
+                      userId: row.user_id || null,
+                      apartmentId: targetApartmentId,
+                      platform: row.platform || 'ios',
+                      lastSuccessfulPush: new Date(),
+                      lastPushFailure: null,
+                      lastPushError: null,
+                    }).catch(e => console.error(`[${id}] Error upserting device health:`, e.message));
                   } else {
                     console.error(`[${id}] VoIP push failed: ${result.reason}`);
                     query(
@@ -345,6 +467,15 @@ function handleConnection(ws) {
                          SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
                        )`, [callId, row.token, result.reason]
                     ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
+                    upsertDeviceHealthSignal({
+                      deviceToken: row.token,
+                      tokenType: row.token_type,
+                      userId: row.user_id || null,
+                      apartmentId: targetApartmentId,
+                      platform: row.platform || 'ios',
+                      lastPushFailure: new Date(),
+                      lastPushError: result.reason || 'push-failed',
+                    }).catch(e => console.error(`[${id}] Error upserting device health:`, e.message));
                     if (result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') {
                       query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'voip'", [row.token])
                         .then(() => console.log(`[${id}] Deleted stale VoIP token`))
@@ -373,6 +504,16 @@ function handleConnection(ws) {
                        SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
                      )`, [callId, row.token]
                   ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
+                  upsertDeviceHealthSignal({
+                    deviceToken: row.token,
+                    tokenType: row.token_type,
+                    userId: row.user_id || null,
+                    apartmentId: targetApartmentId,
+                    platform: row.platform || 'android',
+                    lastSuccessfulPush: new Date(),
+                    lastPushFailure: null,
+                    lastPushError: null,
+                  }).catch(e => console.error(`[${id}] Error upserting device health:`, e.message));
                 })
                 .catch((err) => {
                   console.error(`[${id}] FCM push failed:`, err.message);
@@ -382,6 +523,15 @@ function handleConnection(ws) {
                        SELECT MAX(attempt_number) FROM call_delivery_attempts WHERE call_id = $1 AND device_token = $2
                      )`, [callId, row.token, err.message]
                   ).catch(e => console.error(`[${id}] Error updating delivery attempt:`, e.message));
+                  upsertDeviceHealthSignal({
+                    deviceToken: row.token,
+                    tokenType: row.token_type,
+                    userId: row.user_id || null,
+                    apartmentId: targetApartmentId,
+                    platform: row.platform || 'android',
+                    lastPushFailure: new Date(),
+                    lastPushError: err.message || 'push-failed',
+                  }).catch(e => console.error(`[${id}] Error upserting device health:`, e.message));
                   if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
                     query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'fcm'", [row.token])
                       .then(() => console.log(`[${id}] Deleted stale FCM token`))
@@ -820,11 +970,36 @@ function handleConnection(ws) {
             "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
             [message.userId, message.token]
           );
+          await upsertDeviceHealthSignal({
+            deviceToken: message.token,
+            tokenType: 'fcm',
+            userId: message.userId,
+            apartmentId,
+            platform,
+            lastTokenRefresh: new Date(),
+          });
           console.log(`[${id}] FCM token registered via WS (apartment=${apartmentId})`);
         } else if (role) {
           // Legacy fallback
           fcmTokens.set(role, message.token);
           console.log(`[${id}] FCM token registered for "${role}" (legacy)`);
+        }
+        break;
+      }
+
+      case 'device-info': {
+        if (apartmentId && message.userId && message.deviceToken && message.tokenType) {
+          await upsertDeviceHealthSignal({
+            deviceToken: message.deviceToken,
+            tokenType: message.tokenType,
+            userId: message.userId,
+            apartmentId,
+            platform: message.platform || null,
+            notificationPermission: message.notificationPermission || 'unknown',
+            appVersion: message.appVersion || null,
+            osVersion: message.osVersion ? String(message.osVersion) : null,
+          });
+          console.log(`[${id}] Device info stored for apartment=${apartmentId}`);
         }
         break;
       }

@@ -374,6 +374,22 @@ async function getDeliveryHealth(buildingIds, queryParams) {
   };
 }
 
+async function getDeviceHealth(buildingIds, buildingId) {
+  const err = assertBuilding(buildingIds, buildingId);
+  if (err) return err;
+
+  const result = await query(
+    `SELECT apartment_id, apartment_number, building_id,
+            total_devices, healthy_devices, degraded_devices, unhealthy_devices,
+            apartment_health
+     FROM apartment_device_health
+     WHERE building_id = $1
+     ORDER BY apartment_number`,
+    [buildingId]
+  );
+  return result.rows;
+}
+
 module.exports = {
   listBuildings, updateBuilding,
   listApartments, createApartment, updateApartment, deleteApartment,
@@ -382,4 +398,5 @@ module.exports = {
   listNotifications, createNotification, deleteNotification,
   listAuditLogs,
   getDeliveryHealth,
+  getDeviceHealth,
 };

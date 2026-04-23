@@ -126,6 +126,7 @@
       <button class="nav-tab" onclick="showSection('devices')">Intercoms</button>
       <button class="nav-tab" onclick="showSection('notifications')">Notifications</button>
       <button class="nav-tab" onclick="showSection('audit')">Audit Logs</button>
+      <button class="nav-tab" onclick="showSection('device-health')">Device Health</button>
       <button class="nav-tab" onclick="showSection('delivery-health')">Delivery Health</button>
     </div>
 
@@ -193,6 +194,14 @@
           <button class="btn btn-outline" onclick="loadAuditLogs()">Filter</button>
         </div>
         <div id="auditTable"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Delivery Health Section ═══ -->
+    <div id="sec-device-health" class="section">
+      <div class="card">
+        <h2>Device Health <button class="refresh-btn" onclick="loadDeviceHealth()">&#x21bb; Refresh</button></h2>
+        <div id="deviceHealthContent"><div class="empty-state">Select a building to view device health.</div></div>
       </div>
     </div>
 
@@ -334,6 +343,7 @@ function onBuildingChange() {
   loadDevices();
   loadNotifications();
   loadAuditLogs();
+  loadDeviceHealth();
   loadDeliveryHealth();
 }
 
@@ -676,6 +686,48 @@ function fmtDateTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Device Health
+// ═══════════════════════════════════════════════════════════
+async function loadDeviceHealth() {
+  const container = document.getElementById('deviceHealthContent');
+  if (!selectedBuildingId) {
+    container.innerHTML = '<div class="empty-state">Select a building to view device health.</div>';
+    return;
+  }
+
+  container.innerHTML = '<div class="spinner"></div> Loading…';
+  const data = await apiCall('/api/management/buildings/' + selectedBuildingId + '/device-health');
+  if (!data) {
+    container.innerHTML = '<div class="empty-state">Failed to load device health.</div>';
+    return;
+  }
+
+  if (data.length === 0) {
+    container.innerHTML = '<div class="empty-state">No device health data yet.</div>';
+    return;
+  }
+
+  let html = '<table><thead><tr><th>Apartment</th><th>Total Devices</th><th>Healthy</th><th>Degraded</th><th>Unhealthy</th><th>Status</th></tr></thead><tbody>';
+  for (const row of data) {
+    let color = '#636e72';
+    if (row.apartment_health === 'ok') color = '#1e7a4a';
+    if (row.apartment_health === 'at-risk') color = '#a66a00';
+    if (row.apartment_health === 'critical') color = '#7c1e1e';
+
+    html += `<tr>
+      <td>${esc(row.apartment_number || '—')}</td>
+      <td>${row.total_devices}</td>
+      <td>${row.healthy_devices}</td>
+      <td>${row.degraded_devices}</td>
+      <td>${row.unhealthy_devices}</td>
+      <td><span class="status-badge" style="background:#f1f2f6;color:${color};">${esc(row.apartment_health)}</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════════════════

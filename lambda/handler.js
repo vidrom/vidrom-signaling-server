@@ -188,6 +188,11 @@ exports.handler = async (event) => {
         return json(200, await adminRoutes.getSystemDeliveryHealth());
       }
 
+      // --- Device Health ---
+      if (method === 'GET' && path === '/api/admin/device-health/summary') {
+        return json(200, await adminRoutes.getSystemDeviceHealthSummary());
+      }
+
       return json(404, { error: 'Not found' });
     }
 
@@ -216,6 +221,10 @@ exports.handler = async (event) => {
       }
       if (bldgAptMatch && method === 'POST') {
         return json(200, await managementRoutes.createApartment(buildingIds, bldgAptMatch[1], body));
+      }
+      const bldgDeviceHealthMatch = path.match(/^\/api\/management\/buildings\/([^/]+)\/device-health$/);
+      if (bldgDeviceHealthMatch && method === 'GET') {
+        return json(200, await managementRoutes.getDeviceHealth(buildingIds, bldgDeviceHealthMatch[1]));
       }
       const aptMatch = path.match(/^\/api\/management\/apartments\/([^/]+)$/);
       if (aptMatch && method === 'PUT') {

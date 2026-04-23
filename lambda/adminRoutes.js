@@ -480,6 +480,38 @@ async function getSystemDeliveryHealth() {
   };
 }
 
+async function getSystemDeviceHealthSummary() {
+  const byBuilding = await query(
+    `SELECT b.id AS building_id,
+            b.name AS building_name,
+            COUNT(*) AS apartments,
+            COUNT(*) FILTER (WHERE adh.apartment_health = 'critical') AS critical_apartments,
+            SUM(adh.total_devices) AS total_devices,
+            SUM(adh.healthy_devices) AS healthy_devices,
+            SUM(adh.degraded_devices) AS degraded_devices,
+            SUM(adh.unhealthy_devices) AS unhealthy_devices
+     FROM apartment_device_health adh
+     JOIN buildings b ON b.id = adh.building_id
+     GROUP BY b.id, b.name
+     ORDER BY b.name`
+  );
+
+  const totals = await query(
+    `SELECT
+       COALESCE(SUM(total_devices), 0) AS total_devices,
+       COALESCE(SUM(healthy_devices), 0) AS healthy_devices,
+       COALESCE(SUM(degraded_devices), 0) AS degraded_devices,
+       COALESCE(SUM(unhealthy_devices), 0) AS unhealthy_devices,
+       COUNT(*) FILTER (WHERE apartment_health = 'critical') AS critical_apartments
+     FROM apartment_device_health`
+  );
+
+  return {
+    totals: totals.rows[0],
+    by_building: byBuilding.rows,
+  };
+}
+
 module.exports = {
   listBuildings, createBuilding, updateBuilding, deleteBuilding,
   listApartments, createApartment, updateApartment, deleteApartment,
@@ -492,4 +524,5 @@ module.exports = {
   listClientErrors,
   listSettings, updateSetting,
   getSystemDeliveryHealth,
+  getSystemDeviceHealthSummary,
 };
