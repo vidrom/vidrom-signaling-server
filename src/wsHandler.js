@@ -22,6 +22,7 @@ const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
 const { startRetries, cancelRetries } = require('./retryOrchestrator');
 const { computeDeviceHealth } = require('./deviceHealthScore');
+const { resolveRingTimeoutSec, getRingTimeoutMs } = require('./ringTimeout');
 
 // ---- Max-call-duration safety net (auto-hangup after 60s) ----
 const MAX_CALL_DURATION_MS = 60_000;
@@ -358,6 +359,10 @@ function handleConnection(ws) {
 
         // Create call record in DB and start tracking
         const callId = uuidv4();
+        const ringTimeoutSec = await resolveRingTimeoutSec(query, targetApartmentId);
+        const ringTimeoutMs = getRingTimeoutMs(ringTimeoutSec);
+        console.log(`[${id}] Ring timeout for apartment=${targetApartmentId}: ${ringTimeoutSec}s`);
+
         try {
           await query(
             "INSERT INTO calls (id, building_id, apartment_id, intercom_id, status, expires_at) VALUES ($1, $2, $3, $4, 'calling', NOW() + make_interval(secs => $5))",
@@ -372,29 +377,6 @@ function handleConnection(ws) {
         }
 
         activeCall.start(deviceId, targetApartmentId, 'call', callId);
-
-        // Query building-level no_answer_timeout for this apartment
-        let ringTimeoutSec = 30;
-        try {
-          const bldgResult = await query(
-            'SELECT b.no_answer_timeout FROM buildings b JOIN apartments a ON a.building_id = b.id WHERE a.id = $1',
-            [targetApartmentId]
-          );
-          if (bldgResult.rows.length > 0 && bldgResult.rows[0].no_answer_timeout != null) {
-            ringTimeoutSec = bldgResult.rows[0].no_answer_timeout;
-          } else {
-            const gsResult = await query(
-              "SELECT value FROM global_settings WHERE key = 'no_answer_timeout'"
-            );
-            if (gsResult.rows.length > 0) {
-              ringTimeoutSec = parseInt(gsResult.rows[0].value, 10) || 30;
-            }
-          }
-        } catch (err) {
-          console.error(`[${id}] Error querying no_answer_timeout, using default 30s:`, err.message);
-        }
-        const ringTimeoutMs = ringTimeoutSec * 1000;
-        console.log(`[${id}] Ring timeout for apartment=${targetApartmentId}: ${ringTimeoutSec}s`);
 
         setPendingRing(targetApartmentId, deviceId, ringTimeoutMs, (expiredCall) => {
           // Ring expired — cancel retries and update DB

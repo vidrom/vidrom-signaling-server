@@ -4,7 +4,8 @@
   "description": "WebSocket signaling server for Vidrom WebRTC intercom system",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@parse/node-apn": "^7.1.0",
