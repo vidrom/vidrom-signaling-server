@@ -38,6 +38,20 @@ function json(res, data, statusCode = 200) {
   res.end(JSON.stringify(data));
 }
 
+function jsonNoStore(res, data, statusCode = 200) {
+  if (data && data.status && data.error) {
+    statusCode = data.status;
+    data = { error: data.error };
+  }
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store, no-cache, max-age=0, must-revalidate, private',
+    Pragma: 'no-cache',
+    Expires: '0',
+  });
+  res.end(JSON.stringify(data));
+}
+
 // Extract device identity from Authorization: Bearer <jwt>
 function authenticateDevice(req) {
   const auth = req.headers.authorization;
@@ -191,7 +205,7 @@ async function handleRequest(req, res) {
       json(res, { ok: true });
     } else if (req.method === 'GET' && urlPath === '/api/rtc-config') {
       const clientType = req.headers['x-vidrom-client'] === 'intercom' ? 'intercom' : 'home';
-      json(res, buildRtcConfig(process.env, clientType));
+      jsonNoStore(res, buildRtcConfig(process.env, clientType));
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {
       const body = await readBody(req);
       const { role, token, apartmentId, userId, platform } = body;
