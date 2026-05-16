@@ -43,7 +43,7 @@ const heartbeatInterval = setInterval(() => {
 wss.on('close', () => clearInterval(heartbeatInterval));
 
 httpServer.listen(PORT, async () => {
-  console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
+  console.log(`Vidrom signaling backend running on http://${localIP}:${PORT} (fronted by TLS in production)`);
   await testConnection();
   initAPNs({ failFast: startupConfig.isProduction });
   await recoverActiveCallsFromDB(query);
