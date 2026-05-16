@@ -8,6 +8,7 @@ const { query } = require('./db');
 const { cancelRetries } = require('./retryOrchestrator');
 const admin = require('firebase-admin');
 const { computeDeviceHealth } = require('./deviceHealthScore');
+const { buildRtcConfig } = require('./startupConfig');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -188,6 +189,9 @@ async function handleRequest(req, res) {
         console.log('[HTTP] Decline ignored — no active call found');
       }
       json(res, { ok: true });
+    } else if (req.method === 'GET' && urlPath === '/api/rtc-config') {
+      const clientType = req.headers['x-vidrom-client'] === 'intercom' ? 'intercom' : 'home';
+      json(res, buildRtcConfig(process.env, clientType));
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {
       const body = await readBody(req);
       const { role, token, apartmentId, userId, platform } = body;

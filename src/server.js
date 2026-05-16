@@ -1,18 +1,15 @@
 const { WebSocketServer } = require('ws');
-const admin = require('firebase-admin');
 const http = require('http');
 const os = require('os');
-const serviceAccount = require('../service-account.json');
 const { handleRequest } = require('./httpRoutes');
 const { handleConnection } = require('./wsHandler');
 const { testConnection, query } = require('./db');
 const { initAPNs } = require('./apnsService');
 const { recoverActiveCallsFromDB } = require('./connectionState');
+const { initializeFirebaseAdmin, validateStartupConfig } = require('./startupConfig');
 
-// Initialize Firebase Admin SDK
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+const startupConfig = validateStartupConfig();
+initializeFirebaseAdmin();
 
 const PORT = 8080;
 
@@ -48,6 +45,6 @@ wss.on('close', () => clearInterval(heartbeatInterval));
 httpServer.listen(PORT, async () => {
   console.log(`Vidrom signaling server running on ws://${localIP}:${PORT}`);
   await testConnection();
-  initAPNs();
+  initAPNs({ failFast: startupConfig.isProduction });
   await recoverActiveCallsFromDB(query);
 });

@@ -1,6 +1,11 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'vidrom-dev-secret-change-in-production';
+function getJwtSecret() {
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET is required.');
+  }
+  return process.env.JWT_SECRET;
+}
 
 function generateDeviceToken(deviceId, buildingId) {
   return jwt.sign(
@@ -9,13 +14,13 @@ function generateDeviceToken(deviceId, buildingId) {
       buildingId,
       role: 'intercom',
     },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: '365d' }
   );
 }
 
 function verifyToken(token) {
-  return jwt.verify(token, JWT_SECRET);
+  return jwt.verify(token, getJwtSecret());
 }
 
-module.exports = { generateDeviceToken, verifyToken, JWT_SECRET };
+module.exports = { generateDeviceToken, verifyToken };

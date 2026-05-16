@@ -4,42 +4,44 @@
 // with highest priority, even when the app is killed or device is in DND.
 
 const apn = require('@parse/node-apn');
-const path = require('path');
 const fs = require('fs');
-
-// Configuration via environment variables (with local dev defaults)
-const APN_KEY_PATH = process.env.APN_KEY_PATH || path.join(__dirname, '..', 'apns-key.p8');
-const APN_KEY_ID = process.env.APN_KEY_ID || '';
-const APN_TEAM_ID = process.env.APN_TEAM_ID || '';
-const APN_BUNDLE_ID = process.env.APN_BUNDLE_ID || 'com.vidrom.ai.home';
-const APN_PRODUCTION = process.env.APN_PRODUCTION === 'true';
+const { buildStartupConfig } = require('./startupConfig');
 
 let provider = null;
+let bundleId = '';
 
-function initAPNs() {
-  if (!APN_KEY_ID || !APN_TEAM_ID) {
-    console.warn('[APNs] APN_KEY_ID or APN_TEAM_ID not set — VoIP push disabled');
-    console.warn('[APNs] Set APN_KEY_ID, APN_TEAM_ID env vars and place apns-key.p8 in the server root');
+function initAPNs({ failFast = false } = {}) {
+  const config = buildStartupConfig();
+  const apnsConfig = config.apns;
+
+  if (!apnsConfig.keyId || !apnsConfig.teamId) {
+    const message = '[APNs] APN_KEY_ID or APN_TEAM_ID not set — VoIP push disabled';
+    if (failFast) throw new Error(message);
+    console.warn(message);
     return false;
   }
 
-  if (!fs.existsSync(APN_KEY_PATH)) {
-    console.warn(`[APNs] Key file not found at ${APN_KEY_PATH} — VoIP push disabled`);
+  if (!apnsConfig.keyPath || !fs.existsSync(apnsConfig.keyPath)) {
+    const message = `[APNs] Key file not found at ${apnsConfig.keyPath || '<unset>'} — VoIP push disabled`;
+    if (failFast) throw new Error(message);
+    console.warn(message);
     return false;
   }
 
   try {
     provider = new apn.Provider({
       token: {
-        key: APN_KEY_PATH,
-        keyId: APN_KEY_ID,
-        teamId: APN_TEAM_ID,
+        key: apnsConfig.keyPath,
+        keyId: apnsConfig.keyId,
+        teamId: apnsConfig.teamId,
       },
-      production: APN_PRODUCTION,
+      production: apnsConfig.production,
     });
-    console.log(`[APNs] VoIP push initialized (${APN_PRODUCTION ? 'production' : 'sandbox'}, keyId=${APN_KEY_ID})`);
+    bundleId = apnsConfig.bundleId;
+    console.log(`[APNs] VoIP push initialized (${apnsConfig.production ? 'production' : 'sandbox'}, keyId=${apnsConfig.keyId})`);
     return true;
   } catch (err) {
+    if (failFast) throw err;
     console.error('[APNs] Failed to initialize:', err.message);
     return false;
   }
@@ -60,7 +62,7 @@ async function sendVoipPush(voipToken, callerName, payloadOverride, ttlSeconds =
   }
 
   const notification = new apn.Notification();
-  notification.topic = `${APN_BUNDLE_ID}.voip`;  // PushKit requires ".voip" suffix
+  notification.topic = `${bundleId}.voip`;
   notification.expiry = Math.floor(Date.now() / 1000) + ttlSeconds;
   notification.priority = 10;  // Immediate delivery
   notification.pushType = 'voip';

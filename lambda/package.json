@@ -4,6 +4,7 @@
   "description": "REST API Lambda functions for Vidrom admin and management portals",
   "main": "handler.js",
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.922.0",
     "google-auth-library": "^9.0.0",
     "pg": "^8.20.0"
   },
