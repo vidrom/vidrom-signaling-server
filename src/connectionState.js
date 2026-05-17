@@ -183,10 +183,6 @@ function isPendingRing(apartmentId) {
   return pendingRings.has(apartmentId);
 }
 
-function getPendingRing(apartmentId) {
-  return pendingRings.get(apartmentId) || null;
-}
-
 // ---- Startup recovery: restore ringing state from DB after restart ----
 async function recoverActiveCallsFromDB(queryFn) {
   try {
@@ -272,7 +268,6 @@ module.exports = {
   setPendingRing,
   clearPendingRing,
   isPendingRing,
-  getPendingRing,
   startAcceptTimer,
   clearAcceptTimer,
   recoverActiveCallsFromDB,

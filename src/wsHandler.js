@@ -15,7 +15,7 @@ const {
   clients, fcmTokens, voipTokens,
   addIntercom, removeIntercom, getIntercom, getIntercomForBuilding,
   addHomeClient, removeHomeClient, getHomeClients, sendToApartment,
-  activeCall, activeCalls, setPendingRing, clearPendingRing, isPendingRing, getPendingRing,
+  activeCall, activeCalls, setPendingRing, clearPendingRing, isPendingRing,
   clearAcceptTimer,
 } = require('./connectionState');
 const { query } = require('./db');

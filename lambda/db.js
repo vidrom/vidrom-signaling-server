@@ -72,9 +72,4 @@ async function query(text, params) {
   return result;
 }
 
-async function getClient() {
-  const pool = await getPool();
-  return pool.connect();
-}
-
-module.exports = { query, getClient, getPool };
+module.exports = { query };
