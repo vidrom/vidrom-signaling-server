@@ -12,10 +12,10 @@ const admin = require('firebase-admin');
 const { verifyToken } = require('./auth');
 const { getDevice } = require('./devices');
 const {
-  clients, fcmTokens, voipTokens,
+  clients, fcmTokens,
   addIntercom, removeIntercom, getIntercom, getIntercomForBuilding,
   addHomeClient, removeHomeClient, getHomeClients, sendToApartment,
-  activeCall, activeCalls, setPendingRing, clearPendingRing, isPendingRing,
+  activeCall, setPendingRing, clearPendingRing, isPendingRing,
   clearAcceptTimer,
 } = require('./connectionState');
 const { query } = require('./db');
@@ -195,7 +195,7 @@ function handleConnection(ws) {
     let message;
     try {
       message = JSON.parse(data);
-    } catch (err) {
+    } catch (_err) {
       console.error(`[${id}] Invalid JSON:`, data.toString());
       return;
     }

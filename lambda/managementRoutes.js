@@ -291,7 +291,7 @@ async function listAuditLogs(buildingIds, queryParams) {
 // Delivery Health (read-only)
 // ═══════════════════════════════════════════════════════════
 
-async function getDeliveryHealth(buildingIds, queryParams) {
+async function getDeliveryHealth(buildingIds, _queryParams) {
   if (buildingIds.length === 0) return { recent_calls: [], delivery_rate: null, avg_latency: null, failed_deliveries: [], unhealthy_apartments: [] };
 
   // Recent calls with delivery breakdown

@@ -2,7 +2,7 @@
 // Portal APIs (/api/admin/*, /api/management/*) have moved to Lambda (see ../lambda/)
 // Portal HTML (admin.html, management.html) served from S3+CloudFront (see ../portals/)
 const { generateDeviceToken, verifyToken } = require('./auth');
-const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getIntercomForBuilding, getHomeClients, clearPendingRing, isPendingRing, sendToApartment, startAcceptTimer, clearAcceptTimer } = require('./connectionState');
+const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getHomeClients, clearPendingRing, sendToApartment, startAcceptTimer } = require('./connectionState');
 const { isAPNsReady, sendVoipPush } = require('./apnsService');
 const { query } = require('./db');
 const { cancelRetries } = require('./retryOrchestrator');

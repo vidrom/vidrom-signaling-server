@@ -4,6 +4,7 @@
   "description": "WebSocket signaling server for Vidrom WebRTC intercom system",
   "main": "src/server.js",
   "scripts": {
+    "lint": "npm exec --prefix .. eslint -- .",
     "start": "node src/server.js",
     "test": "node --test"
   },

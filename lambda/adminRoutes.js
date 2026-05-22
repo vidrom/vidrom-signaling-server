@@ -5,7 +5,7 @@ const { query } = require('./db');
 // Buildings
 // ═══════════════════════════════════════════════════════════
 
-async function listBuildings(req, res) {
+async function listBuildings(_req, _res) {
   const result = await query('SELECT * FROM buildings ORDER BY name');
   return result.rows;
 }
