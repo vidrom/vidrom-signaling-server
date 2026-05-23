@@ -14,6 +14,7 @@ const { cancelRetries } = require('./retryOrchestrator');
 const admin = require('firebase-admin');
 const { computeDeviceHealth } = require('./deviceHealthScore');
 const { buildRtcConfig } = require('./startupConfig');
+const { redactEmail, redactId, summarizeError } = require('./logging');
 
 // Helper to read JSON body from request
 function readBody(req) {
@@ -214,14 +215,14 @@ async function handleRequest(req, res) {
       if (callInfo) {
         // Don't relay decline if someone already accepted the call
         if (callInfo.acceptedBy) {
-          console.log(`[HTTP] Decline ignored — call already accepted (accepted=${callInfo.acceptedBy})`);
+          console.log(`[HTTP] Decline ignored — call already accepted (accepted=${redactId(String(callInfo.acceptedBy))})`);
         } else {
           clearPendingRing(callInfo.apartmentId);
           activeCall.clear(callInfo.intercomDeviceId);
           const intercom = getIntercom(callInfo.intercomDeviceId);
           if (intercom && intercom.ws.readyState === 1) {
             intercom.ws.send(JSON.stringify({ type: 'decline' }));
-            console.log(`[HTTP] Decline relayed to intercom=${callInfo.intercomDeviceId}`);
+            console.log(`[HTTP] Decline relayed to intercom=${redactId(callInfo.intercomDeviceId)}`);
           }
         }
       } else {
@@ -257,7 +258,7 @@ async function handleRequest(req, res) {
         platform: platform || 'android',
         lastTokenRefresh: new Date(),
       });
-      console.log(`[HTTP] FCM token registered for apartment=${resident.primaryApartmentId} user=${resident.userId}`);
+      console.log(`[HTTP] FCM token registered for apartment=${redactId(resident.primaryApartmentId)} user=${redactId(resident.userId)}`);
       json(res, { ok: true });
     } else if (req.method === 'POST' && urlPath === '/register-voip-token') {
       const resident = await requireResident(req, res);
@@ -285,7 +286,7 @@ async function handleRequest(req, res) {
         platform: 'ios',
         lastTokenRefresh: new Date(),
       });
-      console.log(`[HTTP] VoIP token registered for apartment=${resident.primaryApartmentId} user=${resident.userId}`);
+      console.log(`[HTTP] VoIP token registered for apartment=${redactId(resident.primaryApartmentId)} user=${redactId(resident.userId)}`);
       json(res, { ok: true });
     } else if (req.method === 'POST' && urlPath === '/api/home/resolve-apartment') {
       const resident = await requireResident(req, res);
@@ -330,7 +331,7 @@ async function handleRequest(req, res) {
         return;
       }
       const token = generateDeviceToken(device.deviceId, device.buildingId);
-      console.log(`[HTTP] Device provisioned: ${device.deviceId}`);
+      console.log(`[HTTP] Device provisioned: ${redactId(device.deviceId)}`);
       json(res, { token, deviceId: device.deviceId, buildingId: device.buildingId });
     } else if (req.method === 'POST' && urlPath === '/api/client-error') {
       const body = await readBody(req);
@@ -415,7 +416,7 @@ async function handleRequest(req, res) {
         [event, callId, deviceToken]
       ).catch(e => console.error('[DB] Error updating delivery attempt on ack:', e.message));
 
-      console.log(`[HTTP] Delivery ack: call=${callId} event=${event} platform=${platform}`);
+      console.log(`[HTTP] Delivery ack: call=${redactId(callId)} event=${event} platform=${platform}`);
       json(res, { ok: true, callStatus: callResult.rows[0].status });
 
       // Send ring-progress with confirmed device count to the intercom
@@ -439,11 +440,11 @@ async function handleRequest(req, res) {
                 callId,
                 devicesConfirmed,
               }));
-              console.log(`[HTTP] Sent ring-progress devicesConfirmed=${devicesConfirmed} to intercom=${intercomId}`);
+              console.log(`[HTTP] Sent ring-progress devicesConfirmed=${devicesConfirmed} to intercom=${redactId(intercomId)}`);
             }
           }
         } catch (e) {
-          console.error('[HTTP] Error sending ring-progress on ack:', e.message);
+          console.error('[HTTP] Error sending ring-progress on ack:', summarizeError(e));
         }
       }
 
@@ -558,7 +559,7 @@ async function handleRequest(req, res) {
         return;
       }
 
-      console.log(`[HTTP] Call ${callId} accepted via HTTP by user=${resident.userId}`);
+      console.log(`[HTTP] Call ${redactId(callId)} accepted via HTTP by user=${redactId(resident.userId)}`);
 
       // Audit log
       query("INSERT INTO audit_logs (event_type, building_id, apartment_id, user_id, intercom_id, call_id, description) VALUES ('call-accepted', $1, $2, $3, $4, $5, 'Call accepted via HTTP')",
@@ -595,22 +596,22 @@ async function handleRequest(req, res) {
         for (const row of tokenResult.rows) {
           if (row.token_type === 'voip' && isAPNsReady()) {
             sendVoipPush(row.token, 'call-taken', { type: 'call-taken', callId })
-              .catch(err => console.error('[HTTP] call-taken VoIP push error:', err.message));
+              .catch(err => console.error('[HTTP] call-taken VoIP push error:', summarizeError(err)));
           } else if (row.token_type === 'fcm') {
             admin.messaging().send({
               token: row.token,
               data: { type: 'call-taken', callId },
               android: { priority: 'high' },
-            }).catch(err => console.error('[HTTP] call-taken FCM error:', err.message));
+            }).catch(err => console.error('[HTTP] call-taken FCM error:', summarizeError(err)));
           }
         }
       } catch (err) {
-        console.error('[HTTP] Error sending call-taken push:', err.message);
+        console.error('[HTTP] Error sending call-taken push:', summarizeError(err));
       }
 
       // Start accept reservation timer (10s) — if device doesn't send offer via WS, revert
       startAcceptTimer(callId, 10_000, async () => {
-        console.log(`[HTTP] Accept reservation expired for call=${callId}, reverting to calling`);
+        console.log(`[HTTP] Accept reservation expired for call=${redactId(callId)}, reverting to calling`);
         // Revert DB
         const revertResult = await query(
           "UPDATE calls SET status = 'calling', updated_at = NOW() WHERE id = $1 AND status = 'accepted' RETURNING *",
@@ -649,17 +650,17 @@ async function handleRequest(req, res) {
           for (const row of tokenResult.rows) {
             if (row.token_type === 'voip' && isAPNsReady()) {
               sendVoipPush(row.token, 'Intercom', { callerName: 'Intercom', type: 'incoming-call', callId })
-                .catch(err => console.error('[HTTP] re-ring VoIP push error:', err.message));
+                .catch(err => console.error('[HTTP] re-ring VoIP push error:', summarizeError(err)));
             } else if (row.token_type === 'fcm') {
               admin.messaging().send({
                 token: row.token,
                 data: { type: 'incoming-call', callerName: 'Intercom', apartmentId: callRow.apartment_id, callId },
                 android: { priority: 'high' },
-              }).catch(err => console.error('[HTTP] re-ring FCM error:', err.message));
+              }).catch(err => console.error('[HTTP] re-ring FCM error:', summarizeError(err)));
             }
           }
         } catch (err) {
-          console.error('[HTTP] Error re-ringing after accept timeout:', err.message);
+          console.error('[HTTP] Error re-ringing after accept timeout:', summarizeError(err));
         }
       });
 
@@ -670,7 +671,7 @@ async function handleRequest(req, res) {
       res.end();
     }
   } catch (err) {
-    console.error(`[HTTP] Error handling ${req.method} ${urlPath}:`, err);
+    console.error(`[HTTP] Error handling ${req.method} ${urlPath}:`, summarizeError(err));
     json(res, { error: 'Internal server error' }, 500);
   }
 }

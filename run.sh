@@ -1,9 +1,21 @@
 #!/bin/bash
 
 set -euo pipefail
+umask 077
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+RUNTIME_SECRETS_DIR="${RUNTIME_SECRETS_DIR:-/run/vidrom-signaling}"
+SECRET_WORK_DIR=""
+
+cleanup() {
+	if [[ -n "$SECRET_WORK_DIR" && -d "$SECRET_WORK_DIR" ]]; then
+		rm -rf "$SECRET_WORK_DIR"
+	fi
+	rm -f "$APP_DIR/service-account.json" "$APP_DIR/apns-key.p8"
+}
+
+trap cleanup EXIT INT TERM
 
 fetch_secret_string() {
 	aws secretsmanager get-secret-value \
@@ -41,6 +53,9 @@ read_optional_secret_field() {
 	return 1
 }
 
+mkdir -p "$RUNTIME_SECRETS_DIR"
+SECRET_WORK_DIR="$(mktemp -d "$RUNTIME_SECRETS_DIR/secrets.XXXXXX")"
+
 if [[ -n "${DB_SECRET_ARN:-}" ]]; then
 	DB_SECRET_JSON="$(fetch_secret_string "$DB_SECRET_ARN")"
 	export DB_HOST="$(read_secret_field "$DB_SECRET_JSON" host)"
@@ -64,18 +79,20 @@ if [[ -n "${RUNTIME_SECRET_ARN:-}" ]]; then
 fi
 
 if [[ -n "${FIREBASE_SERVICE_ACCOUNT_SECRET_ARN:-}" ]]; then
-	FIREBASE_SERVICE_ACCOUNT_PATH="$APP_DIR/service-account.json"
+	FIREBASE_SERVICE_ACCOUNT_PATH="$SECRET_WORK_DIR/service-account.json"
 	fetch_secret_string "$FIREBASE_SERVICE_ACCOUNT_SECRET_ARN" > "$FIREBASE_SERVICE_ACCOUNT_PATH"
 	chmod 600 "$FIREBASE_SERVICE_ACCOUNT_PATH"
 	export FIREBASE_SERVICE_ACCOUNT_PATH
 fi
 
 if [[ -n "${APN_AUTH_KEY_SECRET_ARN:-}" ]]; then
-	APN_KEY_PATH="$APP_DIR/apns-key.p8"
+	APN_KEY_PATH="$SECRET_WORK_DIR/apns-key.p8"
 	fetch_secret_string "$APN_AUTH_KEY_SECRET_ARN" > "$APN_KEY_PATH"
 	chmod 600 "$APN_KEY_PATH"
 	export APN_KEY_PATH
 fi
 
 cd "$APP_DIR"
-exec npm start
+npm start &
+child_pid=$!
+wait "$child_pid"

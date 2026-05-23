@@ -6,6 +6,7 @@
 const apn = require('@parse/node-apn');
 const fs = require('fs');
 const { buildStartupConfig } = require('./startupConfig');
+const { summarizeError } = require('./logging');
 
 let provider = null;
 let bundleId = '';
@@ -38,11 +39,11 @@ function initAPNs({ failFast = false } = {}) {
       production: apnsConfig.production,
     });
     bundleId = apnsConfig.bundleId;
-    console.log(`[APNs] VoIP push initialized (${apnsConfig.production ? 'production' : 'sandbox'}, keyId=${apnsConfig.keyId})`);
+    console.log(`[APNs] VoIP push initialized (${apnsConfig.production ? 'production' : 'sandbox'})`);
     return true;
   } catch (err) {
     if (failFast) throw err;
-    console.error('[APNs] Failed to initialize:', err.message);
+    console.error('[APNs] Failed to initialize:', summarizeError(err));
     return false;
   }
 }
