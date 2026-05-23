@@ -9,13 +9,13 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@parse/node-apn": "^7.1.0",
-    "firebase-admin": "^13.6.1",
-    "google-auth-library": "^9.0.0",
+    "@parse/node-apn": "^8.1.0",
+    "firebase-admin": "^13.10.0",
+    "google-auth-library": "^10.0.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.20.0",
     "uuid": "^9.0.1",
-    "ws": "^8.16.0"
+    "ws": "^8.20.1"
   },
   "private": true
 }

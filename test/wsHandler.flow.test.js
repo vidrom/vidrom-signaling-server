@@ -81,12 +81,24 @@ function createWsHandlerHarness({
   const { handleConnection } = requireWithMocks('../src/wsHandler', {
     './auth': {
       verifyToken() {
-        return { deviceId: 'intercom-1', buildingId: 'building-1' };
+        return { deviceId: 'intercom-1', buildingId: 'building-1', role: 'intercom' };
+      },
+      async authenticateResidentToken() {
+        return {
+          userId: 'user-1',
+          apartmentIds: ['apt-1'],
+          primaryApartmentId: 'apt-1',
+          buildingIds: ['building-1'],
+          apartments: [{ apartmentId: 'apt-1', buildingId: 'building-1' }],
+        };
+      },
+      residentHasApartmentAccess(context, apartmentId) {
+        return context.apartmentIds.includes(apartmentId);
       },
     },
     './devices': {
       async getDevice() {
-        return { id: 'intercom-1', status: 'active' };
+        return { id: 'intercom-1', buildingId: 'building-1', status: 'active' };
       },
     },
     './connectionState': connectionStateMock,
@@ -145,7 +157,7 @@ test('ring -> accept -> offer -> hangup relays across the winning home client', 
   harness.handleConnection(homeWs);
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
-  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1' });
+  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
   await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
   await flushAsync(2);
 
@@ -185,8 +197,8 @@ test('first accept wins and later acceptors receive call-taken', async () => {
   harness.handleConnection(homeTwoWs);
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
-  await homeOneWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1' });
-  await homeTwoWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1' });
+  await homeOneWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
+  await homeTwoWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
   await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
   await flushAsync(2);
 
@@ -217,7 +229,7 @@ test('WS accept reconciles a prior HTTP accept from the same user', async () => 
   harness.handleConnection(homeWs);
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
-  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1' });
+  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
   await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
   await flushAsync(2);
 
@@ -246,7 +258,7 @@ test('ring expiry marks the call unanswered and clears in-memory state', async (
   harness.handleConnection(homeWs);
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
-  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1' });
+  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
   await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
   await flushAsync(2);
 
@@ -271,7 +283,7 @@ test('watch start and watch end relay cleanly and clear watch state', async () =
   harness.handleConnection(homeWs);
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
-  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1' });
+  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
   await homeWs.emitMessage({ type: 'watch' });
   await flushAsync();
 

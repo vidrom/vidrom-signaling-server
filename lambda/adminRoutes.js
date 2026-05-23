@@ -1,5 +1,6 @@
 // Admin API routes — full CRUD for system administrators
 const { query } = require('./db');
+const { hashDoorCode, normalizeDoorCode } = require('./doorCode');
 
 // ═══════════════════════════════════════════════════════════
 // Buildings
@@ -225,7 +226,9 @@ async function listApartmentResidents(apartmentId) {
 
 async function listDevices() {
   const result = await query(
-    `SELECT i.*, b.name as building_name FROM intercoms i
+    `SELECT i.id, i.building_id, i.name, i.gate_id, i.status, i.provisioning_code,
+            i.provisioning_status, NULL::text AS door_code, i.is_door_open,
+            i.created_at, i.updated_at, b.name as building_name FROM intercoms i
      JOIN buildings b ON i.building_id = b.id ORDER BY b.name, i.name`
   );
   return result.rows;
@@ -234,17 +237,18 @@ async function listDevices() {
 async function createDevice(body) {
   const { building_id, name, gate_id, door_code } = body;
   if (!building_id || !name) return { error: 'building_id and name are required', status: 400 };
+  const normalizedDoorCode = normalizeDoorCode(door_code);
   // Generate 6-digit provisioning code, stored in DB for persistent provisioning
   const provisioningCode = Math.floor(100000 + Math.random() * 900000).toString();
   const result = await query(
-    'INSERT INTO intercoms (building_id, name, gate_id, door_code, provisioning_code, provisioning_status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-    [building_id, name, gate_id || null, door_code || null, provisioningCode, 'pending']
+    'INSERT INTO intercoms (building_id, name, gate_id, door_code, door_code_hash, provisioning_code, provisioning_status) VALUES ($1, $2, $3, NULL, $4, $5, $6) RETURNING *',
+    [building_id, name, gate_id || null, normalizedDoorCode ? hashDoorCode(normalizedDoorCode) : null, provisioningCode, 'pending']
   );
-  return result.rows[0];
+  return { ...result.rows[0], door_code: null };
 }
 
 async function updateDevice(id, body) {
-  const fields = ['name', 'gate_id', 'door_code'];
+  const fields = ['name', 'gate_id'];
   const sets = [];
   const values = [];
   let idx = 1;
@@ -254,6 +258,12 @@ async function updateDevice(id, body) {
       values.push(body[f]);
     }
   }
+  if (body.door_code !== undefined) {
+    const normalizedDoorCode = normalizeDoorCode(body.door_code);
+    sets.push(`door_code = NULL`);
+    sets.push(`door_code_hash = $${idx++}`);
+    values.push(normalizedDoorCode ? hashDoorCode(normalizedDoorCode) : null);
+  }
   if (sets.length === 0) return { error: 'No fields to update', status: 400 };
   values.push(id);
   const result = await query(
@@ -261,7 +271,7 @@ async function updateDevice(id, body) {
     values
   );
   if (result.rows.length === 0) return { error: 'Intercom not found', status: 404 };
-  return result.rows[0];
+  return { ...result.rows[0], door_code: null };
 }
 
 async function deleteDevice(id) {

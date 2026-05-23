@@ -9,7 +9,7 @@
 // - WebRTC offer/answer/candidate flow between intercom ↔ accepted home client
 const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
-const { verifyToken } = require('./auth');
+const { authenticateResidentToken, residentHasApartmentAccess, verifyToken } = require('./auth');
 const { getDevice } = require('./devices');
 const {
   clients, fcmTokens,
@@ -184,12 +184,34 @@ function handleConnection(ws) {
   let buildingId = null;      // resolved for both roles
   let apartmentId = null;     // set when home client registers with an apartment
   let intercomDeviceId = null; // which intercom this home client routes to
+  let residentContext = null;  // verified home resident context
 
   // Mark alive for server-level heartbeat ping/pong
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
   console.log(`[${id}] New connection`);
+
+  function rejectHomeAction(action) {
+    console.error(`[${id}] Home action rejected before authenticated registration: ${action}`);
+    ws.send(JSON.stringify({ type: 'error', message: 'Authenticated home registration required' }));
+  }
+
+  function getHomeActiveCall() {
+    const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
+    return { targetIntercom, call: targetIntercom ? activeCall.get(targetIntercom) : null };
+  }
+
+  function isAcceptedHomeClient(call) {
+    return !!call && (call.acceptedBy === id || call.acceptedWs === ws);
+  }
+
+  function isAuthorizedHomeSignal() {
+    const { call } = getHomeActiveCall();
+    if (!call) return false;
+    if (call.type === 'watch') return isAcceptedHomeClient(call);
+    return isAcceptedHomeClient(call);
+  }
 
   ws.on('message', async (data) => {
     let message;
@@ -221,8 +243,11 @@ function handleConnection(ws) {
           }
           try {
             const decoded = verifyToken(message.token);
+            if (decoded.role !== 'intercom') {
+              throw new Error('Invalid device token role');
+            }
             const device = await getDevice(decoded.deviceId);
-            if (!device || device.status !== 'active') {
+            if (!device || device.status !== 'active' || device.buildingId !== decoded.buildingId) {
               console.error(`[${id}] Intercom rejected: device ${decoded.deviceId} not active`);
               ws.send(JSON.stringify({ type: 'error', message: 'Device revoked or not found' }));
               ws.close();
@@ -245,29 +270,44 @@ function handleConnection(ws) {
 
         // Home clients register with their apartmentId
         if (role === 'home') {
-          apartmentId = message.apartmentId || null;
-          if (apartmentId) {
-            // Resolve apartment → building → intercom
-            try {
-              const bldgResult = await query(
-                'SELECT building_id FROM apartments WHERE id = $1', [apartmentId]
-              );
-              if (bldgResult.rows[0]) {
-                buildingId = bldgResult.rows[0].building_id;
-                const intercom = getIntercomForBuilding(buildingId);
-                if (intercom) {
-                  intercomDeviceId = intercom.deviceId;
-                }
-              }
-            } catch (err) {
-              console.error(`[${id}] Failed to resolve building for apartment=${apartmentId}:`, err.message);
-            }
-            addHomeClient(apartmentId, id, ws, buildingId);
-            console.log(`[${id}] Home registered for apartment=${apartmentId}, building=${buildingId}, intercom=${intercomDeviceId || 'none'}`);
-          } else {
-            // Legacy: no apartmentId — treat as single home client
-            clients.home = ws;
-            console.log(`[${id}] Home registered (legacy, no apartmentId)`);
+          if (!message.token) {
+            console.error(`[${id}] Home rejected: no resident token provided`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Token required' }));
+            ws.close();
+            return;
+          }
+
+          try {
+            residentContext = await authenticateResidentToken(message.token);
+          } catch (err) {
+            console.error(`[${id}] Home rejected: invalid resident token — ${err.message}`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
+            ws.close();
+            return;
+          }
+
+          const requestedApartmentId = message.apartmentId || residentContext.primaryApartmentId;
+          if (!requestedApartmentId || !residentHasApartmentAccess(residentContext, requestedApartmentId)) {
+            console.error(`[${id}] Home rejected: apartment outside resident scope`);
+            ws.send(JSON.stringify({ type: 'error', message: 'Forbidden' }));
+            ws.close();
+            return;
+          }
+
+          if (apartmentId && apartmentId !== requestedApartmentId) {
+            removeHomeClient(apartmentId, id);
+          }
+
+          apartmentId = requestedApartmentId;
+          const apartment = residentContext.apartments.find((entry) => entry.apartmentId === apartmentId);
+          buildingId = apartment?.buildingId || residentContext.buildingIds[0] || null;
+          const intercom = buildingId ? getIntercomForBuilding(buildingId) : null;
+          intercomDeviceId = intercom?.deviceId || null;
+          addHomeClient(apartmentId, id, ws, buildingId);
+          console.log(`[${id}] Home authenticated for apartment=${apartmentId}, building=${buildingId}, intercom=${intercomDeviceId || 'none'}`);
+
+          if (clients.home === ws) {
+            clients.home = null;
           }
         }
 
@@ -547,17 +587,24 @@ function handleConnection(ws) {
       }
 
       case 'accept': {
+        if (role !== 'home' || !residentContext || !apartmentId) {
+          rejectHomeAction('accept');
+          break;
+        }
         // Home accepts the call — first-accept-wins
         // Resolve which intercom's call this home client is accepting
-        const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
-        const call = targetIntercom ? activeCall.get(targetIntercom) : null;
+        const { targetIntercom, call } = getHomeActiveCall();
         if (!call) {
           ws.send(JSON.stringify({ type: 'error', message: 'No active call' }));
           break;
         }
+        if (!residentHasApartmentAccess(residentContext, call.apartmentId)) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Forbidden' }));
+          break;
+        }
 
         // Check if this call was already HTTP-accepted by this same user
-        const wsUserId = message.userId || null;
+        const wsUserId = residentContext.userId;
         const httpAlreadyAccepted = call.httpAcceptedBy && wsUserId && call.httpAcceptedBy === wsUserId;
 
         if (httpAlreadyAccepted) {
@@ -658,10 +705,14 @@ function handleConnection(ws) {
       }
 
       case 'decline': {
+        if (role !== 'home' || !residentContext || !apartmentId) {
+          rejectHomeAction('decline');
+          break;
+        }
         // Individual resident declines — doesn't end the call for others
-        const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
-        const call = targetIntercom ? activeCall.get(targetIntercom) : null;
+        const { targetIntercom, call } = getHomeActiveCall();
         if (!call) break;
+        if (!residentHasApartmentAccess(residentContext, call.apartmentId)) break;
 
         activeCall.decline(targetIntercom, id);
         console.log(`[${id}] Declined call (apartment=${call.apartmentId}, intercom=${targetIntercom})`);
@@ -701,6 +752,10 @@ function handleConnection(ws) {
       case 'offer': {
         // WebRTC SDP offer — route based on role
         if (role === 'home') {
+          if (!residentContext || !isAuthorizedHomeSignal()) {
+            rejectHomeAction('offer');
+            break;
+          }
           // Cancel accept reservation timer — device is connected and sending offer
           const offerCall = intercomDeviceId ? activeCall.get(intercomDeviceId)
             : (apartmentId ? activeCall.getByApartment(apartmentId) : null);
@@ -734,6 +789,10 @@ function handleConnection(ws) {
       case 'answer': {
         // WebRTC SDP answer — route based on role
         if (role === 'home') {
+          if (!residentContext || !isAuthorizedHomeSignal()) {
+            rejectHomeAction('answer');
+            break;
+          }
           // Home → Intercom
           const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
           if (intercom && intercom.ws.readyState === 1) {
@@ -768,6 +827,10 @@ function handleConnection(ws) {
             clients.home.send(JSON.stringify({ type: 'candidate', candidate: message.candidate }));
           }
         } else {
+          if (!residentContext || !isAuthorizedHomeSignal()) {
+            rejectHomeAction('candidate');
+            break;
+          }
           // Home → Intercom
           const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
           if (intercom && intercom.ws.readyState === 1) {
@@ -781,6 +844,10 @@ function handleConnection(ws) {
       }
 
       case 'open-door': {
+        if (role !== 'home' || !residentContext || !isAuthorizedHomeSignal()) {
+          rejectHomeAction('open-door');
+          break;
+        }
         // Home tells intercom to open the door
         const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
         if (intercom && intercom.ws.readyState === 1) {
@@ -837,10 +904,13 @@ function handleConnection(ws) {
             clients.home.send(JSON.stringify({ type: 'hangup' }));
           }
         } else {
+          if (role !== 'home' || !residentContext || !apartmentId) {
+            rejectHomeAction('hangup');
+            break;
+          }
           // Home hung up — notify the correct intercom
-          const targetIntercom = intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null);
+          const { targetIntercom, call } = getHomeActiveCall();
           if (targetIntercom) {
-            const call = activeCall.get(targetIntercom);
             if (call) {
               // Only relay hangup if this is the accepted client (or no one accepted yet).
               // Other apartment devices that lost the first-accept-wins race may
@@ -876,6 +946,10 @@ function handleConnection(ws) {
       }
 
       case 'watch': {
+        if (role !== 'home' || !residentContext || !apartmentId) {
+          rejectHomeAction('watch');
+          break;
+        }
         // Home wants to view intercom camera — route to their building's intercom
         const intercom = intercomDeviceId ? getIntercom(intercomDeviceId) : null;
         const targetWs = intercom ? intercom.ws : clients.intercom;
@@ -912,6 +986,10 @@ function handleConnection(ws) {
       }
 
       case 'watch-end': {
+        if (role === 'home' && (!residentContext || !apartmentId)) {
+          rejectHomeAction('watch-end');
+          break;
+        }
         const targetIntercom = role === 'intercom' ? deviceId
           : (intercomDeviceId || (apartmentId ? (activeCall.getByApartment(apartmentId) || {}).intercomDeviceId : null));
         const call = targetIntercom ? activeCall.get(targetIntercom) : null;
@@ -940,22 +1018,22 @@ function handleConnection(ws) {
 
       case 'register-fcm-token': {
         // WS-based FCM token registration
-        if (apartmentId && message.userId) {
+        if (role === 'home' && residentContext && apartmentId && message.token) {
           const platform = message.platform || 'android';
           await query(
             `INSERT INTO device_tokens (apartment_id, user_id, token, token_type, platform, updated_at)
              VALUES ($1, $2, $3, 'fcm', $4, NOW())
              ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, platform = $4, updated_at = NOW()`,
-            [apartmentId, message.userId, message.token, platform]
+            [apartmentId, residentContext.userId, message.token, platform]
           );
           await query(
             "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
-            [message.userId, message.token]
+            [residentContext.userId, message.token]
           );
           await upsertDeviceHealthSignal({
             deviceToken: message.token,
             tokenType: 'fcm',
-            userId: message.userId,
+            userId: residentContext.userId,
             apartmentId,
             platform,
             lastTokenRefresh: new Date(),
@@ -970,11 +1048,11 @@ function handleConnection(ws) {
       }
 
       case 'device-info': {
-        if (apartmentId && message.userId && message.deviceToken && message.tokenType) {
+        if (role === 'home' && residentContext && apartmentId && message.deviceToken && message.tokenType) {
           await upsertDeviceHealthSignal({
             deviceToken: message.deviceToken,
             tokenType: message.tokenType,
-            userId: message.userId,
+            userId: residentContext.userId,
             apartmentId,
             platform: message.platform || null,
             notificationPermission: message.notificationPermission || 'unknown',

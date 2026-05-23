@@ -1,6 +1,10 @@
 const jwt = require('jsonwebtoken');
 const admin = require('firebase-admin');
+const { OAuth2Client } = require('google-auth-library');
 const { query } = require('./db');
+
+const GOOGLE_CLIENT_ID = '1070504632843-t3ohfvsimcqsjspt31v8ajpvdffait6c.apps.googleusercontent.com';
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 const RESIDENT_CONTEXT_SELECT = `SELECT u.id AS user_id,
         u.email,
@@ -148,6 +152,83 @@ async function authenticateResidentRequest(req, options = {}) {
   return resolveResidentContextFromClaims(decodedToken, options.queryFn || query);
 }
 
+async function authenticateResidentToken(token, options = {}) {
+  if (!token) {
+    throw createHttpError(401, 'Unauthorized');
+  }
+
+  const authClient = options.authClient || admin.auth();
+  let decodedToken;
+  try {
+    decodedToken = await authClient.verifyIdToken(token);
+  } catch {
+    throw createHttpError(401, 'Unauthorized');
+  }
+
+  return resolveResidentContextFromClaims(decodedToken, options.queryFn || query);
+}
+
+function getGoogleSubject(payload) {
+  return payload && typeof payload.sub === 'string' && payload.sub.trim() ? payload.sub : null;
+}
+
+async function verifyGoogleToken(token) {
+  if (!token) return null;
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: GOOGLE_CLIENT_ID,
+    });
+    return ticket.getPayload();
+  } catch {
+    return null;
+  }
+}
+
+async function authenticateAdminRequest(req, options = {}) {
+  const token = getBearerTokenFromRequest(req);
+  if (!token) {
+    throw createHttpError(401, 'Unauthorized');
+  }
+
+  const payload = await (options.verifyGoogleToken || verifyGoogleToken)(token);
+  const googleSubject = getGoogleSubject(payload);
+  if (!payload || !googleSubject) {
+    throw createHttpError(401, 'Unauthorized');
+  }
+
+  const queryFn = options.queryFn || query;
+  let result = await queryFn(
+    'SELECT id, email, name, role, google_subject FROM users WHERE google_subject = $1',
+    [googleSubject]
+  );
+
+  let user = result.rows[0] || null;
+  if (!user && payload.email && payload.email_verified === true) {
+    result = await queryFn(
+      "SELECT id, email, name, role, google_subject FROM users WHERE LOWER(email) = LOWER($1) AND role = 'admin'",
+      [payload.email]
+    );
+    user = result.rows[0] || null;
+    if (user && !user.google_subject) {
+      const bound = await queryFn(
+        `UPDATE users
+         SET google_subject = $1
+         WHERE id = $2 AND google_subject IS NULL
+         RETURNING id, email, name, role, google_subject`,
+        [googleSubject, user.id]
+      );
+      user = bound.rows[0] || user;
+    }
+  }
+
+  if (!user || user.role !== 'admin' || (user.google_subject && user.google_subject !== googleSubject)) {
+    throw createHttpError(403, 'Forbidden');
+  }
+
+  return { ...payload, userId: user.id, dbUser: user };
+}
+
 function residentHasApartmentAccess(residentContext, apartmentId) {
   return !!apartmentId && residentContext.apartmentIds.includes(apartmentId);
 }
@@ -159,5 +240,7 @@ module.exports = {
   getBearerTokenFromRequest,
   resolveResidentContextFromClaims,
   authenticateResidentRequest,
+  authenticateResidentToken,
+  authenticateAdminRequest,
   residentHasApartmentAccess,
 };

@@ -167,7 +167,9 @@ async function removeResident(buildingIds, apartmentId, userId) {
 async function listDevices(buildingIds) {
   if (buildingIds.length === 0) return [];
   const result = await query(
-    `SELECT i.*, b.name as building_name FROM intercoms i
+    `SELECT i.id, i.building_id, i.name, i.gate_id, i.status, i.provisioning_code,
+            i.provisioning_status, NULL::text AS door_code, i.is_door_open,
+            i.created_at, i.updated_at, b.name as building_name FROM intercoms i
      JOIN buildings b ON i.building_id = b.id
      WHERE i.building_id = ANY($1::uuid[]) ORDER BY b.name, i.name`,
     [buildingIds]

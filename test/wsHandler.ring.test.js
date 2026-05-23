@@ -148,12 +148,12 @@ test('ring handler resolves timeout before insert and reuses it consistently', a
   const { handleConnection } = requireWithMocks('../src/wsHandler', {
     './auth': {
       verifyToken() {
-        return { deviceId: 'intercom-1', buildingId: 'building-1' };
+        return { deviceId: 'intercom-1', buildingId: 'building-1', role: 'intercom' };
       },
     },
     './devices': {
       async getDevice() {
-        return { id: 'intercom-1', status: 'active' };
+        return { id: 'intercom-1', buildingId: 'building-1', status: 'active' };
       },
     },
     './connectionState': connectionStateMock,

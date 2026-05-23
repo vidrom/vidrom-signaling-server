@@ -4,6 +4,7 @@
 const {
   generateDeviceToken,
   verifyToken,
+  authenticateAdminRequest,
   authenticateResidentRequest,
   residentHasApartmentAccess,
 } = require('./auth');
@@ -14,17 +15,39 @@ const { cancelRetries } = require('./retryOrchestrator');
 const admin = require('firebase-admin');
 const { computeDeviceHealth } = require('./deviceHealthScore');
 const { buildRtcConfig } = require('./startupConfig');
-const { redactEmail, redactId, summarizeError } = require('./logging');
+const { redactId, summarizeError } = require('./logging');
+const { hashDoorCode, normalizeDoorCode, verifyDoorCode } = require('./doorCode');
+const { checkHttpRateLimit, rateLimitHeaders } = require('./rateLimit');
+
+const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MAX_JSON_BODY_BYTES || '32768', 10);
 
 // Helper to read JSON body from request
-function readBody(req) {
+function createHttpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  err.expose = true;
+  return err;
+}
+
+function readBody(req, options = {}) {
+  const maxBytes = options.maxBytes || MAX_JSON_BODY_BYTES;
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    let received = 0;
+    req.on('data', (chunk) => {
+      received += chunk.length;
+      if (received > maxBytes) {
+        reject(createHttpError(413, 'Request body too large'));
+        if (typeof req.destroy === 'function') req.destroy();
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
       try { resolve(body ? JSON.parse(body) : {}); }
-      catch (err) { reject(err); }
+      catch (_err) { reject(createHttpError(400, 'Invalid JSON body')); }
     });
+    req.on('error', reject);
   });
 }
 
@@ -35,12 +58,12 @@ function parsePath(url) {
 }
 
 // Send JSON response
-function json(res, data, statusCode = 200) {
+function json(res, data, statusCode = 200, extraHeaders = {}) {
   if (data && data.status && data.error) {
     statusCode = data.status;
     data = { error: data.error };
   }
-  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  res.writeHead(statusCode, { 'Content-Type': 'application/json', ...extraHeaders });
   res.end(JSON.stringify(data));
 }
 
@@ -58,12 +81,20 @@ function jsonNoStore(res, data, statusCode = 200) {
   res.end(JSON.stringify(data));
 }
 
+function applyRateLimit(req, res, urlPath) {
+  const rateLimit = checkHttpRateLimit(req, urlPath);
+  if (!rateLimit || !rateLimit.limited) return false;
+  json(res, { error: 'Too many requests' }, 429, rateLimitHeaders(rateLimit));
+  return true;
+}
+
 // Extract device identity from Authorization: Bearer <jwt>
 function authenticateDevice(req) {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith('Bearer ')) return null;
   try {
-    return verifyToken(auth.slice(7)); // { deviceId, buildingId, role }
+    const decoded = verifyToken(auth.slice(7)); // { deviceId, buildingId, role }
+    return decoded.role === 'intercom' ? decoded : null;
   } catch {
     return null;
   }
@@ -77,6 +108,29 @@ async function requireResident(req, res) {
     json(res, { error: err.expose ? err.message : 'Internal server error' }, status);
     return null;
   }
+}
+
+async function requireAdmin(req, res) {
+  try {
+    return await authenticateAdminRequest(req);
+  } catch (err) {
+    const status = err.status || 500;
+    json(res, { error: err.expose ? err.message : 'Internal server error' }, status);
+    return null;
+  }
+}
+
+function truncateText(value, maxLength) {
+  if (value === undefined || value === null) return null;
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
+function redactClientText(value) {
+  if (!value) return value;
+  return String(value)
+    .replace(/Bearer\s+[A-Za-z0-9._~+\-/]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
 }
 
 async function upsertDeviceHealthSignal({
@@ -195,8 +249,14 @@ async function handleRequest(req, res) {
 
   const urlPath = parsePath(req.url);
 
+  if (applyRateLimit(req, res, urlPath)) {
+    return;
+  }
+
   try {
-    if (req.method === 'POST' && urlPath === '/decline') {
+    if (req.method === 'GET' && urlPath === '/healthz') {
+      jsonNoStore(res, { ok: true });
+    } else if (req.method === 'POST' && urlPath === '/decline') {
       console.log('[HTTP] Decline request received');
       const resident = await requireResident(req, res);
       if (!resident) return;
@@ -231,6 +291,13 @@ async function handleRequest(req, res) {
       json(res, { ok: true });
     } else if (req.method === 'GET' && urlPath === '/api/rtc-config') {
       const clientType = req.headers['x-vidrom-client'] === 'intercom' ? 'intercom' : 'home';
+      if (clientType === 'intercom') {
+        const device = authenticateDevice(req);
+        if (!device) { json(res, { error: 'Unauthorized' }, 401); return; }
+      } else {
+        const resident = await requireResident(req, res);
+        if (!resident) return;
+      }
       jsonNoStore(res, buildRtcConfig(process.env, clientType));
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {
       const resident = await requireResident(req, res);
@@ -342,12 +409,16 @@ async function handleRequest(req, res) {
         json(res, { error: 'app, error_type, and message are required' }, 400);
         return;
       }
+      if (!['home', 'intercom'].includes(app)) {
+        json(res, { error: 'Invalid app' }, 400);
+        return;
+      }
       await query(
         `INSERT INTO client_errors (app, error_type, message, stack, context,
            platform, os_version, app_version, device_model,
            user_id, user_email, apartment_id, building_id, intercom_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [app, error_type, errMsg, stack || null, context ? JSON.stringify(context) : null,
+        [app, truncateText(error_type, 80), truncateText(redactClientText(errMsg), 2000), truncateText(redactClientText(stack), 4000), context ? truncateText(redactClientText(JSON.stringify(context)), 4000) : null,
          platform || null, os_version || null, app_version || null, device_model || null,
          user_id || null, user_email || null, apartment_id || null, building_id || null, intercom_id || null]
       );
@@ -449,6 +520,8 @@ async function handleRequest(req, res) {
       }
 
     } else if (req.method === 'GET' && urlPath === '/debug/status') {
+      const adminUser = await requireAdmin(req, res);
+      if (!adminUser) return;
       // Collect all active calls across intercoms
       const calls = {};
       for (const [devId, call] of activeCalls) {
@@ -474,13 +547,8 @@ async function handleRequest(req, res) {
         clients: {
           intercom: clients.intercom ? (clients.intercom.readyState === 1 ? 'connected' : 'stale') : null,
         },
-        fcmTokens: {
-          home: fcmTokens.has('home') ? fcmTokens.get('home').substring(0, 20) + '...' : null,
-          intercom: fcmTokens.has('intercom') ? fcmTokens.get('intercom').substring(0, 20) + '...' : null,
-        },
-        voipTokens: {
-          home: voipTokens.has('home') ? voipTokens.get('home').substring(0, 20) + '...' : null,
-        },
+        fcmTokens: { home: fcmTokens.has('home'), intercom: fcmTokens.has('intercom') },
+        voipTokens: { home: voipTokens.has('home') },
         apns: {
           ready: isAPNsReady(),
         },
@@ -512,13 +580,19 @@ async function handleRequest(req, res) {
       const { code } = body;
       if (!code) { json(res, { error: 'Code required' }, 400); return; }
       const result = await query(
-        `SELECT door_code FROM intercoms WHERE id = $1`,
+        `SELECT door_code, door_code_hash FROM intercoms WHERE id = $1`,
         [device.deviceId]
       );
       const intercom = result.rows[0];
-      if (!intercom || !intercom.door_code) { json(res, { valid: false }, 200); return; }
-      const valid = intercom.door_code === code;
-      json(res, { valid, ...(valid ? {} : { expected: intercom.door_code }) });
+      if (!intercom || (!intercom.door_code && !intercom.door_code_hash)) { json(res, { valid: false }, 200); return; }
+      const normalizedCode = normalizeDoorCode(code);
+      const valid = intercom.door_code_hash
+        ? verifyDoorCode(normalizedCode, intercom.door_code_hash)
+        : normalizeDoorCode(intercom.door_code) === normalizedCode;
+      if (valid && !intercom.door_code_hash) {
+        await query('UPDATE intercoms SET door_code_hash = $1, door_code = NULL WHERE id = $2', [hashDoorCode(normalizedCode), device.deviceId]);
+      }
+      json(res, { valid });
 
     } else if (req.method === 'POST' && urlPath.startsWith('/api/home/calls/') && urlPath.endsWith('/accept')) {
       // ---- A6: HTTP accept — reserve the call before WS connects ----
@@ -671,6 +745,10 @@ async function handleRequest(req, res) {
       res.end();
     }
   } catch (err) {
+    if (err.status && err.expose) {
+      json(res, { error: err.message }, err.status);
+      return;
+    }
     console.error(`[HTTP] Error handling ${req.method} ${urlPath}:`, summarizeError(err));
     json(res, { error: 'Internal server error' }, 500);
   }

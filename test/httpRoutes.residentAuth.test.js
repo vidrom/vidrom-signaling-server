@@ -4,13 +4,18 @@ const { EventEmitter } = require('node:events');
 
 const { requireWithMocks } = require('./wsTestHarness');
 
-function createRequest({ method = 'GET', url = '/', headers = {}, body } = {}) {
+function createRequest({ method = 'GET', url = '/', headers = {}, body, rawBody } = {}) {
   const req = new EventEmitter();
   req.method = method;
   req.url = url;
   req.headers = headers;
 
   process.nextTick(() => {
+    if (rawBody !== undefined) {
+      req.emit('data', Buffer.from(rawBody));
+      req.emit('end');
+      return;
+    }
     if (body !== undefined) {
       req.emit('data', Buffer.from(JSON.stringify(body)));
     }
@@ -38,7 +43,7 @@ function createResponse() {
   };
 }
 
-function createHandleRequestHarness({ queryImpl, residentContext } = {}) {
+function createHandleRequestHarness({ queryImpl, residentContext, adminContext } = {}) {
   const queryCalls = [];
   const httpAcceptCalls = [];
 
@@ -48,7 +53,16 @@ function createHandleRequestHarness({ queryImpl, residentContext } = {}) {
         return 'device-token';
       },
       verifyToken() {
-        return { deviceId: 'intercom-1', buildingId: 'building-1' };
+        return { deviceId: 'intercom-1', buildingId: 'building-1', role: 'intercom' };
+      },
+      async authenticateAdminRequest() {
+        if (!adminContext) {
+          const err = new Error('Unauthorized');
+          err.status = 401;
+          err.expose = true;
+          throw err;
+        }
+        return adminContext;
       },
       async authenticateResidentRequest() {
         if (!residentContext) {
@@ -125,6 +139,99 @@ function createHandleRequestHarness({ queryImpl, residentContext } = {}) {
 
   return { handleRequest, queryCalls, httpAcceptCalls };
 }
+
+test('healthz is public and minimal', async () => {
+  const harness = createHandleRequestHarness({
+    queryImpl() {
+      throw new Error('query should not run');
+    },
+  });
+
+  const req = createRequest({ method: 'GET', url: '/healthz' });
+  const res = createResponse();
+
+  await harness.handleRequest(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), { ok: true });
+});
+
+test('debug status requires admin auth', async () => {
+  const harness = createHandleRequestHarness({
+    queryImpl() {
+      throw new Error('query should not run');
+    },
+  });
+
+  const req = createRequest({ method: 'GET', url: '/debug/status' });
+  const res = createResponse();
+
+  await harness.handleRequest(req, res);
+
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(JSON.parse(res.body), { error: 'Unauthorized' });
+});
+
+test('rtc config requires resident auth for home clients', async () => {
+  const harness = createHandleRequestHarness({
+    queryImpl() {
+      throw new Error('query should not run');
+    },
+    residentContext: null,
+  });
+
+  const req = createRequest({ method: 'GET', url: '/api/rtc-config' });
+  const res = createResponse();
+
+  await harness.handleRequest(req, res);
+
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(JSON.parse(res.body), { error: 'Unauthorized' });
+});
+
+test('intercom door-code verification never discloses expected code', async () => {
+  const harness = createHandleRequestHarness({
+    queryImpl(sql) {
+      if (sql.includes('SELECT door_code, door_code_hash FROM intercoms')) {
+        return { rows: [{ door_code: '123456', door_code_hash: null }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  });
+
+  const req = createRequest({
+    method: 'POST',
+    url: '/api/intercom/verify-door-code',
+    headers: { authorization: 'Bearer device-token' },
+    body: { code: '000000' },
+  });
+  const res = createResponse();
+
+  await harness.handleRequest(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), { valid: false });
+});
+
+test('oversized JSON body is rejected before route handling', async () => {
+  const harness = createHandleRequestHarness({
+    queryImpl() {
+      throw new Error('query should not run');
+    },
+  });
+
+  const req = createRequest({
+    method: 'POST',
+    url: '/api/client-error',
+    rawBody: JSON.stringify({ app: 'home', error_type: 'x', message: 'a'.repeat(40000) }),
+  });
+  const res = createResponse();
+
+  await harness.handleRequest(req, res);
+
+  assert.equal(res.statusCode, 413);
+  assert.deepEqual(JSON.parse(res.body), { error: 'Request body too large' });
+});
 
 test('resolve-apartment returns 401 without resident bearer auth', async () => {
   const harness = createHandleRequestHarness({
