@@ -1,7 +1,12 @@
 // HTTP route handler — EC2-resident endpoints only
 // Portal APIs (/api/admin/*, /api/management/*) have moved to Lambda (see ../lambda/)
 // Portal HTML (admin.html, management.html) served from S3+CloudFront (see ../portals/)
-const { generateDeviceToken, verifyToken } = require('./auth');
+const {
+  generateDeviceToken,
+  verifyToken,
+  authenticateResidentRequest,
+  residentHasApartmentAccess,
+} = require('./auth');
 const { clients, fcmTokens, voipTokens, activeCall, activeCalls, intercoms, getIntercom, getHomeClients, clearPendingRing, sendToApartment, startAcceptTimer } = require('./connectionState');
 const { isAPNsReady, sendVoipPush } = require('./apnsService');
 const { query } = require('./db');
@@ -59,6 +64,16 @@ function authenticateDevice(req) {
   try {
     return verifyToken(auth.slice(7)); // { deviceId, buildingId, role }
   } catch {
+    return null;
+  }
+}
+
+async function requireResident(req, res) {
+  try {
+    return await authenticateResidentRequest(req);
+  } catch (err) {
+    const status = err.status || 500;
+    json(res, { error: err.expose ? err.message : 'Internal server error' }, status);
     return null;
   }
 }
@@ -182,10 +197,20 @@ async function handleRequest(req, res) {
   try {
     if (req.method === 'POST' && urlPath === '/decline') {
       console.log('[HTTP] Decline request received');
+      const resident = await requireResident(req, res);
+      if (!resident) return;
       const body = await readBody(req);
-      const { apartmentId } = body;
+      const requestedApartmentId = body.apartmentId || resident.primaryApartmentId;
+      if (!requestedApartmentId) {
+        json(res, { error: 'apartmentId required' }, 400);
+        return;
+      }
+      if (!residentHasApartmentAccess(resident, requestedApartmentId)) {
+        json(res, { error: 'Forbidden' }, 403);
+        return;
+      }
       // Find the active call for this apartment
-      const callInfo = apartmentId ? activeCall.getByApartment(apartmentId) : null;
+      const callInfo = activeCall.getByApartment(requestedApartmentId);
       if (callInfo) {
         // Don't relay decline if someone already accepted the call
         if (callInfo.acceptedBy) {
@@ -207,111 +232,89 @@ async function handleRequest(req, res) {
       const clientType = req.headers['x-vidrom-client'] === 'intercom' ? 'intercom' : 'home';
       jsonNoStore(res, buildRtcConfig(process.env, clientType));
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {
+      const resident = await requireResident(req, res);
+      if (!resident) return;
       const body = await readBody(req);
-      const { role, token, apartmentId, userId, platform } = body;
+      const { token, platform } = body;
       if (!token) { json(res, { error: 'token required' }, 400); return; }
+      if (!resident.primaryApartmentId) { json(res, { error: 'Resident apartment required' }, 403); return; }
 
-      // If apartmentId provided, store in DB (new per-apartment flow)
-      if (apartmentId && userId) {
-        await query(
-          `INSERT INTO device_tokens (apartment_id, user_id, token, token_type, platform, updated_at)
-           VALUES ($1, $2, $3, 'fcm', $4, NOW())
-           ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, platform = $4, updated_at = NOW()`,
-          [apartmentId, userId, token, platform || 'android']
-        );
-        await query(
-          "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
-          [userId, token]
-        );
-        await upsertDeviceHealthSignal({
-          deviceToken: token,
-          tokenType: 'fcm',
-          userId,
-          apartmentId,
-          platform: platform || 'android',
-          lastTokenRefresh: new Date(),
-        });
-        console.log(`[HTTP] FCM token registered for apartment=${apartmentId} user=${userId}`);
-        json(res, { ok: true });
-      } else if (role && token) {
-        // Legacy fallback: in-memory by role
-        fcmTokens.set(role, token);
-        console.log(`[HTTP] FCM token registered for "${role}" (legacy)`);
-        json(res, { ok: true });
-      } else {
-        json(res, { error: 'token and (apartmentId+userId or role) required' }, 400);
-      }
-    } else if (req.method === 'POST' && urlPath === '/register-voip-token') {
-      const body = await readBody(req);
-      const { role, token, apartmentId, userId } = body;
-      if (!token) { json(res, { error: 'token required' }, 400); return; }
-
-      // If apartmentId provided, store in DB (new per-apartment flow)
-      if (apartmentId && userId) {
-        await query(
-          `INSERT INTO device_tokens (apartment_id, user_id, token, token_type, platform, updated_at)
-           VALUES ($1, $2, $3, 'voip', 'ios', NOW())
-           ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, updated_at = NOW()`,
-          [apartmentId, userId, token]
-        );
-        await query(
-          "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'voip' AND token != $2",
-          [userId, token]
-        );
-        await upsertDeviceHealthSignal({
-          deviceToken: token,
-          tokenType: 'voip',
-          userId,
-          apartmentId,
-          platform: 'ios',
-          lastTokenRefresh: new Date(),
-        });
-        console.log(`[HTTP] VoIP token registered for apartment=${apartmentId} user=${userId}`);
-        json(res, { ok: true });
-      } else if (role && token) {
-        // Legacy fallback: in-memory by role
-        voipTokens.set(role, token);
-        console.log(`[HTTP] VoIP token registered for "${role}" (legacy)`);
-        json(res, { ok: true });
-      } else {
-        json(res, { error: 'token and (apartmentId+userId or role) required' }, 400);
-      }
-    } else if (req.method === 'POST' && urlPath === '/api/home/resolve-apartment') {
-      // Resolve user email → apartment(s) via apartment_residents junction table
-      const body = await readBody(req);
-      const { email } = body;
-      if (!email) { json(res, { error: 'email required' }, 400); return; }
-
-      const result = await query(
-        `SELECT u.id AS user_id, u.name AS user_name,
-                a.id AS apartment_id, a.number AS apartment_number, a.name AS apartment_name,
-                  a.building_id,
-                  b.name AS building_name,
-                  b.address AS building_address
-         FROM users u
-         JOIN apartment_residents ar ON ar.user_id = u.id
-         JOIN apartments a ON a.id = ar.apartment_id
-           JOIN buildings b ON b.id = a.building_id
-         WHERE u.email = $1`,
-        [email]
+      await query(
+        `INSERT INTO device_tokens (apartment_id, user_id, token, token_type, platform, updated_at)
+         VALUES ($1, $2, $3, 'fcm', $4, NOW())
+         ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, platform = $4, updated_at = NOW()`,
+        [resident.primaryApartmentId, resident.userId, token, platform || 'android']
       );
+      await query(
+        "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'fcm' AND token != $2",
+        [resident.userId, token]
+      );
+      await upsertDeviceHealthSignal({
+        deviceToken: token,
+        tokenType: 'fcm',
+        userId: resident.userId,
+        apartmentId: resident.primaryApartmentId,
+        platform: platform || 'android',
+        lastTokenRefresh: new Date(),
+      });
+      console.log(`[HTTP] FCM token registered for apartment=${resident.primaryApartmentId} user=${resident.userId}`);
+      json(res, { ok: true });
+    } else if (req.method === 'POST' && urlPath === '/register-voip-token') {
+      const resident = await requireResident(req, res);
+      if (!resident) return;
+      const body = await readBody(req);
+      const { token } = body;
+      if (!token) { json(res, { error: 'token required' }, 400); return; }
+      if (!resident.primaryApartmentId) { json(res, { error: 'Resident apartment required' }, 403); return; }
 
-      if (result.rows.length === 0) {
+      await query(
+        `INSERT INTO device_tokens (apartment_id, user_id, token, token_type, platform, updated_at)
+         VALUES ($1, $2, $3, 'voip', 'ios', NOW())
+         ON CONFLICT (token, token_type) DO UPDATE SET apartment_id = $1, user_id = $2, updated_at = NOW()`,
+        [resident.primaryApartmentId, resident.userId, token]
+      );
+      await query(
+        "DELETE FROM device_tokens WHERE user_id = $1 AND token_type = 'voip' AND token != $2",
+        [resident.userId, token]
+      );
+      await upsertDeviceHealthSignal({
+        deviceToken: token,
+        tokenType: 'voip',
+        userId: resident.userId,
+        apartmentId: resident.primaryApartmentId,
+        platform: 'ios',
+        lastTokenRefresh: new Date(),
+      });
+      console.log(`[HTTP] VoIP token registered for apartment=${resident.primaryApartmentId} user=${resident.userId}`);
+      json(res, { ok: true });
+    } else if (req.method === 'POST' && urlPath === '/api/home/resolve-apartment') {
+      const resident = await requireResident(req, res);
+      if (!resident) return;
+      const primaryApartment = resident.primaryApartment;
+      if (!primaryApartment) {
         json(res, { error: 'No apartment found for this user' }, 404);
         return;
       }
 
-      // Return the first apartment (a user is typically a resident of one apartment)
-      const row = result.rows[0];
+      const result = await query(
+        `SELECT b.name AS building_name, b.address AS building_address
+         FROM buildings b
+         WHERE b.id = $1`,
+        [primaryApartment.buildingId]
+      );
+
+      const row = result.rows[0] || {};
       json(res, {
-        userId: row.user_id,
-        userName: row.user_name,
-        apartmentId: row.apartment_id,
-        apartmentNumber: row.apartment_number,
-        apartmentName: row.apartment_name,
-        buildingId: row.building_id,
+        userId: resident.userId,
+        userName: resident.userName,
+        apartmentId: primaryApartment.apartmentId,
+        apartmentNumber: primaryApartment.apartmentNumber,
+        apartmentName: primaryApartment.apartmentName,
+        buildingId: primaryApartment.buildingId,
         buildingName: row.building_name,
         buildingAddress: row.building_address,
+        apartmentIds: resident.apartmentIds,
+        primaryApartmentId: resident.primaryApartmentId,
       });
     } else if (req.method === 'POST' && urlPath === '/api/devices/provision') {
       const body = await readBody(req);
@@ -351,33 +354,51 @@ async function handleRequest(req, res) {
       json(res, { ok: true });
 
     } else if (req.method === 'POST' && urlPath.startsWith('/api/home/calls/') && urlPath.endsWith('/ack')) {
+      const resident = await requireResident(req, res);
+      if (!resident) return;
       const parts = urlPath.split('/');
       const callId = parts[4]; // /api/home/calls/:callId/ack
       if (!callId) { json(res, { error: 'callId required' }, 400); return; }
 
       const body = await readBody(req);
-      const { event, deviceToken, tokenType, platform, userId } = body;
+      const { event, deviceToken, tokenType, platform } = body;
       const allowedEvents = ['push-received', 'app-awake', 'incoming-ui-shown', 'accepted', 'declined'];
       if (!event || !allowedEvents.includes(event)) { json(res, { error: 'Invalid event' }, 400); return; }
       if (!deviceToken || !tokenType || !platform) { json(res, { error: 'deviceToken, tokenType, and platform are required' }, 400); return; }
 
       // Validate callId exists
-      const callResult = await query('SELECT status FROM calls WHERE id = $1', [callId]);
+      const callResult = await query('SELECT status, apartment_id FROM calls WHERE id = $1', [callId]);
       if (callResult.rows.length === 0) { json(res, { error: 'Call not found' }, 404); return; }
+
+      const callApartmentId = callResult.rows[0].apartment_id;
+      if (!residentHasApartmentAccess(resident, callApartmentId)) {
+        json(res, { error: 'Forbidden' }, 403);
+        return;
+      }
+
+      const tokenOwnershipResult = await query(
+        `SELECT apartment_id
+         FROM device_tokens
+         WHERE user_id = $1 AND token = $2 AND token_type = $3
+         LIMIT 1`,
+        [resident.userId, deviceToken, tokenType]
+      );
+      if (tokenOwnershipResult.rows.length === 0 || tokenOwnershipResult.rows[0].apartment_id !== callApartmentId) {
+        json(res, { error: 'Forbidden' }, 403);
+        return;
+      }
 
       await query(
         `INSERT INTO call_delivery_acks (call_id, user_id, device_token, token_type, platform, event)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [callId, userId || null, deviceToken, tokenType, platform, event]
+        [callId, resident.userId, deviceToken, tokenType, platform, event]
       );
 
-      const callInfo = await query('SELECT apartment_id FROM calls WHERE id = $1', [callId]);
-      const apartmentId = callInfo.rows[0]?.apartment_id || null;
       await upsertDeviceHealthSignal({
         deviceToken,
         tokenType,
-        userId: userId || null,
-        apartmentId,
+        userId: resident.userId,
+        apartmentId: callApartmentId,
         platform,
         lastAckAt: new Date(),
         lastCallAckEvent: event,
@@ -504,14 +525,18 @@ async function handleRequest(req, res) {
       const callId = parts[4]; // /api/home/calls/:callId/accept
       if (!callId) { json(res, { error: 'callId required' }, 400); return; }
 
-      const body = await readBody(req);
-      const { userId } = body;
-      if (!userId) { json(res, { error: 'userId required' }, 400); return; }
+      const resident = await requireResident(req, res);
+      if (!resident) return;
 
       // Look up current call status
       const callResult = await query('SELECT id, status, apartment_id, intercom_id, building_id FROM calls WHERE id = $1', [callId]);
       if (callResult.rows.length === 0) { json(res, { error: 'Call not found' }, 404); return; }
       const callRow = callResult.rows[0];
+
+      if (!residentHasApartmentAccess(resident, callRow.apartment_id)) {
+        json(res, { error: 'Forbidden' }, 403);
+        return;
+      }
 
       // If not in 'calling' status, return current status so app knows immediately
       if (callRow.status !== 'calling') {
@@ -533,15 +558,15 @@ async function handleRequest(req, res) {
         return;
       }
 
-      console.log(`[HTTP] Call ${callId} accepted via HTTP by user=${userId}`);
+      console.log(`[HTTP] Call ${callId} accepted via HTTP by user=${resident.userId}`);
 
       // Audit log
-      query("INSERT INTO audit_logs (event_type, building_id, apartment_id, intercom_id, call_id, description) VALUES ('call-accepted', $1, $2, $3, $4, 'Call accepted via HTTP')",
-        [callRow.building_id, callRow.apartment_id, callRow.intercom_id, callId]
+      query("INSERT INTO audit_logs (event_type, building_id, apartment_id, user_id, intercom_id, call_id, description) VALUES ('call-accepted', $1, $2, $3, $4, $5, 'Call accepted via HTTP')",
+        [callRow.building_id, callRow.apartment_id, resident.userId, callRow.intercom_id, callId]
       ).catch(e => console.error('[DB] http-accept audit_log:', e.message));
 
       // Update in-memory state
-      const httpAccepted = activeCall.httpAccept(callRow.intercom_id, userId);
+      const httpAccepted = activeCall.httpAccept(callRow.intercom_id, resident.userId);
       if (httpAccepted) {
         clearPendingRing(callRow.apartment_id);
         cancelRetries(callId);
@@ -600,7 +625,7 @@ async function handleRequest(req, res) {
 
         // Clear in-memory accept
         const call = activeCall.get(callRow.intercom_id);
-        if (call && call.httpAcceptedBy === userId) {
+        if (call && call.httpAcceptedBy === resident.userId) {
           call.acceptedBy = null;
           call.acceptedWs = null;
           call.httpAcceptedBy = null;
