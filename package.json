@@ -6,7 +6,8 @@
   "scripts": {
     "lint": "npm exec --prefix .. eslint -- .",
     "start": "node src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:coverage": "c8 --all --check-coverage --statements 40 --branches 47 --functions 66 --lines 40 --src src --src lambda --reporter=text --reporter=lcov --report-dir coverage --exclude \"test/**\" --exclude \"coverage/**\" node --test"
   },
   "dependencies": {
     "@parse/node-apn": "^8.1.0",
@@ -17,5 +18,8 @@
     "uuid": "^9.0.1",
     "ws": "^8.20.1"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "c8": "^10.1.3"
+  }
 }
