@@ -387,7 +387,7 @@ async function loadBuildings() {
     document.getElementById('buildingsTable').innerHTML = '<div class="empty-state">No buildings yet.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Apartments</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Managers</th><th>Actions</th></tr></thead><tbody>';
   for (const b of data) {
     html += `<tr>
       <td>${esc(b.name)}</td><td>${esc(b.address)}</td>
@@ -505,11 +505,12 @@ async function loadApartmentsSection() {
     document.getElementById('apartmentsTable').innerHTML = '<div class="empty-state">No apartments in this building.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Num of Residents</th><th>Actions</th></tr></thead><tbody>';
   for (const a of data) {
     html += `<tr>
       <td>${esc(a.number)}</td><td>${esc(a.name || '—')}</td>
       <td><button class="btn btn-outline btn-small" onclick="showAptResidents('${a.id}','${esc(a.number)}')">Residents</button></td>
+      <td>${Number.isFinite(a.resident_count) ? a.resident_count : Number(a.resident_count || 0)}</td>
       <td class="inline-actions">
         <button class="btn btn-outline btn-small" onclick="editApartment('${a.id}','${esc(a.number)}','${esc(a.name || '')}')">Edit</button>
         <button class="btn btn-danger btn-small" onclick="deleteApartment('${a.id}')">Delete</button>

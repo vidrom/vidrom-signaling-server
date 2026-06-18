@@ -8,9 +8,6 @@ let assignedBuildings = [];
 let selectedBuildingId = null;
 
 window.addEventListener('DOMContentLoaded', () => {
-  google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredentialResponse });
-  renderGoogleButton();
-
   document.addEventListener('click', handleClick);
   document.getElementById('buildingSelect').addEventListener('change', onBuildingChange);
   document.getElementById('editModal').addEventListener('click', (event) => {
@@ -19,7 +16,25 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('assignModal').addEventListener('click', (event) => {
     if (event.target === document.getElementById('assignModal')) closeAssignModal();
   });
+
+  initializeGoogleAuth();
 });
+
+function initializeGoogleAuth(attempt = 0) {
+  if (window.google?.accounts?.id) {
+    window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredentialResponse });
+    renderGoogleButton();
+    return;
+  }
+
+  if (attempt >= 100) {
+    console.error('Google Identity Services failed to load.');
+    renderGoogleButtonUnavailable();
+    return;
+  }
+
+  window.setTimeout(() => initializeGoogleAuth(attempt + 1), 50);
+}
 
 function handleClick(event) {
   const actionTarget = event.target.closest('[data-action]');
@@ -78,7 +93,7 @@ async function testManagementAccess() {
 }
 
 function handleSignOut() {
-  google.accounts.id.disableAutoSelect();
+  window.google?.accounts?.id?.disableAutoSelect?.();
   idToken = null;
   userEmail = null;
   userName = null;
@@ -93,7 +108,20 @@ function renderGoogleButton() {
   const buttonHost = document.createElement('div');
   buttonHost.id = 'googleSignInBtn';
   authArea.replaceChildren(buttonHost);
-  google.accounts.id.renderButton(buttonHost, { theme: 'outline', size: 'large' });
+  if (!window.google?.accounts?.id) {
+    renderGoogleButtonUnavailable();
+    return;
+  }
+  window.google.accounts.id.renderButton(buttonHost, { theme: 'outline', size: 'large' });
+}
+
+function renderGoogleButtonUnavailable() {
+  const authArea = document.getElementById('authArea');
+  const fallback = document.createElement('div');
+  fallback.style.fontSize = '13px';
+  fallback.style.color = '#fff';
+  fallback.textContent = 'Google sign-in unavailable. Refresh the page.';
+  authArea.replaceChildren(fallback);
 }
 
 function renderUserInfo(name, pictureUrl) {
@@ -147,7 +175,7 @@ function showSection(name, button) {
 
 function populateBuildingSelect() {
   const select = document.getElementById('buildingSelect');
-  select.innerHTML = '<option value="">All Buildings</option>';
+  select.innerHTML = '';
   for (const building of assignedBuildings) {
     const option = document.createElement('option');
     option.value = building.id;
@@ -262,9 +290,9 @@ async function loadApartments() {
     container.innerHTML = '<div class="empty-state">No apartments in this building.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Num of Residents</th><th>Actions</th></tr></thead><tbody>';
   for (const apartment of data) {
-    html += `<tr><td>${esc(apartment.number)}</td><td>${esc(apartment.name || '—')}</td><td><button class="btn btn-outline btn-small" data-action="show-residents" data-apartment-id="${esc(apartment.id)}" data-apartment-number="${esc(apartment.number)}">Residents</button></td><td class="inline-actions"><button class="btn btn-outline btn-small" data-action="edit-apartment" data-apartment-id="${esc(apartment.id)}" data-apartment-number="${esc(apartment.number)}" data-apartment-name="${esc(apartment.name || '')}">Edit</button><button class="btn btn-danger btn-small" data-action="delete-apartment" data-apartment-id="${esc(apartment.id)}">Delete</button></td></tr>`;
+    html += `<tr><td>${esc(apartment.number)}</td><td>${esc(apartment.name || '—')}</td><td><button class="btn btn-outline btn-small" data-action="show-residents" data-apartment-id="${esc(apartment.id)}" data-apartment-number="${esc(apartment.number)}">Residents</button></td><td>${Number.isFinite(apartment.resident_count) ? apartment.resident_count : Number(apartment.resident_count || 0)}</td><td class="inline-actions"><button class="btn btn-outline btn-small" data-action="edit-apartment" data-apartment-id="${esc(apartment.id)}" data-apartment-number="${esc(apartment.number)}" data-apartment-name="${esc(apartment.name || '')}">Edit</button><button class="btn btn-danger btn-small" data-action="delete-apartment" data-apartment-id="${esc(apartment.id)}">Delete</button></td></tr>`;
   }
   html += '</tbody></table>';
   container.innerHTML = html;
@@ -343,9 +371,9 @@ async function loadDevices() {
     container.innerHTML = '<div class="empty-state">No intercoms.</div>';
     return;
   }
-  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Door Code</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Status</th><th>Action</th></tr></thead><tbody>';
   for (const device of filtered) {
-    html += `<tr><td>${esc(device.name)}</td><td>${esc(device.building_name)}</td><td>${esc(device.gate_id || '—')}</td><td><code>${esc(device.door_code || '—')}</code></td><td><span class="status-badge status-${device.status}">${device.status}</span></td><td class="inline-actions"><button class="btn btn-danger btn-small" data-action="revoke-device" data-device-id="${esc(device.id)}">Revoke</button><button class="btn btn-outline btn-small" data-action="reprovision-device" data-device-id="${esc(device.id)}">Re-provision</button></td></tr>`;
+    html += `<tr><td>${esc(device.name)}</td><td>${esc(device.building_name)}</td><td>${esc(device.gate_id || '—')}</td><td><span class="status-badge status-${device.status}">${device.status}</span></td><td class="inline-actions"><button class="btn btn-danger btn-small" data-action="revoke-device" data-device-id="${esc(device.id)}">Revoke</button><button class="btn btn-outline btn-small" data-action="reprovision-device" data-device-id="${esc(device.id)}">Re-provision</button></td></tr>`;
   }
   html += '</tbody></table>';
   container.innerHTML = html;

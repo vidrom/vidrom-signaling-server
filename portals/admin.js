@@ -8,9 +8,6 @@ let cachedBuildings = [];
 let cachedUsers = [];
 
 window.addEventListener('DOMContentLoaded', () => {
-  google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredentialResponse });
-  renderGoogleButton();
-
   document.addEventListener('click', handleClick);
   document.getElementById('aptBldgSelect').addEventListener('change', loadApartmentsSection);
   document.getElementById('editModal').addEventListener('click', (event) => {
@@ -19,7 +16,25 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('assignModal').addEventListener('click', (event) => {
     if (event.target === document.getElementById('assignModal')) closeAssignModal();
   });
+
+  initializeGoogleAuth();
 });
+
+function initializeGoogleAuth(attempt = 0) {
+  if (window.google?.accounts?.id) {
+    window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleCredentialResponse });
+    renderGoogleButton();
+    return;
+  }
+
+  if (attempt >= 100) {
+    console.error('Google Identity Services failed to load.');
+    renderGoogleButtonUnavailable();
+    return;
+  }
+
+  window.setTimeout(() => initializeGoogleAuth(attempt + 1), 50);
+}
 
 function handleClick(event) {
   const actionTarget = event.target.closest('[data-action]');
@@ -98,7 +113,6 @@ function handleClick(event) {
         actionTarget.dataset.deviceId,
         actionTarget.dataset.deviceName,
         actionTarget.dataset.gateId || '',
-        actionTarget.dataset.doorCode || '',
       );
       break;
     case 'revoke-device':
@@ -168,7 +182,7 @@ async function testAdminAccess() {
 }
 
 function handleSignOut() {
-  google.accounts.id.disableAutoSelect();
+  window.google?.accounts?.id?.disableAutoSelect?.();
   idToken = null;
   userEmail = null;
   userName = null;
@@ -181,7 +195,20 @@ function renderGoogleButton() {
   const buttonHost = document.createElement('div');
   buttonHost.id = 'googleSignInBtn';
   authArea.replaceChildren(buttonHost);
-  google.accounts.id.renderButton(buttonHost, { theme: 'outline', size: 'large' });
+  if (!window.google?.accounts?.id) {
+    renderGoogleButtonUnavailable();
+    return;
+  }
+  window.google.accounts.id.renderButton(buttonHost, { theme: 'outline', size: 'large' });
+}
+
+function renderGoogleButtonUnavailable() {
+  const authArea = document.getElementById('authArea');
+  const fallback = document.createElement('div');
+  fallback.style.fontSize = '13px';
+  fallback.style.color = '#fff';
+  fallback.textContent = 'Google sign-in unavailable. Refresh the page.';
+  authArea.replaceChildren(fallback);
 }
 
 function renderUserInfo(name, pictureUrl) {
@@ -292,7 +319,7 @@ async function loadBuildings() {
     return;
   }
 
-  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Apartments</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Managers</th><th>Actions</th></tr></thead><tbody>';
   for (const building of data) {
     html += `<tr>
       <td>${esc(building.name)}</td>
@@ -420,12 +447,13 @@ async function loadApartmentsSection() {
     return;
   }
 
-  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Number</th><th>Name</th><th>Residents</th><th>Num of Residents</th><th>Actions</th></tr></thead><tbody>';
   for (const apartment of data) {
     html += `<tr>
       <td>${esc(apartment.number)}</td>
       <td>${esc(apartment.name || '—')}</td>
       <td><button class="btn btn-outline btn-small" data-action="show-apt-residents" data-apartment-id="${esc(apartment.id)}" data-apartment-number="${esc(apartment.number)}">Residents</button></td>
+      <td>${Number.isFinite(apartment.resident_count) ? apartment.resident_count : Number(apartment.resident_count || 0)}</td>
       <td class="inline-actions">
         <button class="btn btn-outline btn-small" data-action="edit-apartment" data-apartment-id="${esc(apartment.id)}" data-apartment-number="${esc(apartment.number)}" data-apartment-name="${esc(apartment.name || '')}">Edit</button>
         <button class="btn btn-danger btn-small" data-action="delete-apartment" data-apartment-id="${esc(apartment.id)}">Delete</button>
@@ -605,16 +633,15 @@ async function loadDevices() {
     return;
   }
 
-  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Door Code</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
   for (const device of data) {
     html += `<tr>
       <td>${esc(device.name)}</td>
       <td>${esc(device.building_name)}</td>
       <td>${esc(device.gate_id || '—')}</td>
-      <td><code>${esc(device.door_code || '—')}</code></td>
       <td><span class="status-badge status-${device.status}">${device.status}</span></td>
       <td class="inline-actions">
-        <button class="btn btn-outline btn-small" data-action="edit-device" data-device-id="${esc(device.id)}" data-device-name="${esc(device.name)}" data-gate-id="${esc(device.gate_id || '')}" data-door-code="${esc(device.door_code || '')}">Edit</button>
+        <button class="btn btn-outline btn-small" data-action="edit-device" data-device-id="${esc(device.id)}" data-device-name="${esc(device.name)}" data-gate-id="${esc(device.gate_id || '')}">Edit</button>
         <button class="btn btn-danger btn-small" data-action="revoke-device" data-device-id="${esc(device.id)}">Revoke</button>
         <button class="btn btn-outline btn-small" data-action="reprovision-device" data-device-id="${esc(device.id)}">Re-provision</button>
         <button class="btn btn-danger btn-small" data-action="delete-device" data-device-id="${esc(device.id)}">Delete</button>
@@ -646,13 +673,13 @@ async function createDevice() {
   }
 }
 
-function editDevice(id, name, gateId, doorCode) {
+function editDevice(id, name, gateId) {
   openModal(
     'Edit Intercom',
     `
       <div class="form-group"><label>Name</label><input id="m-dName" value="${esc(name)}" /></div>
       <div class="form-group"><label>Gate ID</label><input id="m-dGate" value="${esc(gateId)}" /></div>
-      <div class="form-group"><label>Door Code</label><input id="m-dCode" value="${esc(doorCode)}" /></div>
+      <div class="form-group"><label>Set New Door Code</label><input id="m-dCode" placeholder="Leave blank to keep the current code" /></div>
     `,
     async () => {
       const result = await apiPut(`/api/admin/devices/${id}`, {

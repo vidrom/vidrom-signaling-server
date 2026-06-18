@@ -54,7 +54,13 @@ async function listApartments(buildingIds, buildingId) {
   const err = assertBuilding(buildingIds, buildingId);
   if (err) return err;
   const result = await query(
-    'SELECT a.*, b.name as building_name FROM apartments a JOIN buildings b ON a.building_id = b.id WHERE a.building_id = $1 ORDER BY a.number',
+    `SELECT a.*, b.name as building_name, COUNT(ar.user_id)::int AS resident_count
+     FROM apartments a
+     JOIN buildings b ON a.building_id = b.id
+     LEFT JOIN apartment_residents ar ON ar.apartment_id = a.id
+     WHERE a.building_id = $1
+     GROUP BY a.id, b.name
+     ORDER BY a.number`,
     [buildingId]
   );
   return result.rows;

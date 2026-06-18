@@ -42,6 +42,14 @@ class FakeWebSocket {
     this.readyState = 3;
   }
 
+  async emitClose() {
+    this.close();
+    const handler = this.handlers.get('close');
+    if (handler) {
+      await handler();
+    }
+  }
+
   async emitMessage(message) {
     const handler = this.handlers.get('message');
     assert.ok(handler, 'message handler must be registered');

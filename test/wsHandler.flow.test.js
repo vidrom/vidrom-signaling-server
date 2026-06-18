@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const signalingContract = require('../../test/signalingContract');
 const {
   FakeWebSocket,
   createConnectionStateMock,
@@ -158,28 +159,22 @@ test('ring -> accept -> offer -> hangup relays across the winning home client', 
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
   await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
-  await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
+  await intercomWs.emitMessage(signalingContract.intercomToServer.ring({ apartmentId: 'apt-1' }));
   await flushAsync(2);
 
-  assert.deepEqual(homeWs.sentMessages.at(-1), {
-    type: 'ring',
-    callId: 'call-1',
-  });
+  assert.deepEqual(homeWs.sentMessages.at(-1), signalingContract.serverToHome.ring({ callId: 'call-1' }));
 
-  await homeWs.emitMessage({ type: 'accept', userId: 'user-1' });
+  await homeWs.emitMessage(signalingContract.homeToServer.accept({ userId: 'user-1' }));
   await flushAsync(2);
-  assert.deepEqual(intercomWs.sentMessages.at(-1), { type: 'accept', callId: 'call-1' });
+  assert.deepEqual(intercomWs.sentMessages.at(-1), signalingContract.serverToIntercom.accept({ callId: 'call-1' }));
 
-  await homeWs.emitMessage({ type: 'offer', sdp: { type: 'offer', sdp: 'offer-sdp' } });
+  await homeWs.emitMessage(signalingContract.homeToServer.offer());
   await flushAsync();
-  assert.deepEqual(intercomWs.sentMessages.at(-1), {
-    type: 'offer',
-    sdp: { type: 'offer', sdp: 'offer-sdp' },
-  });
+  assert.deepEqual(intercomWs.sentMessages.at(-1), signalingContract.serverToIntercom.offer());
 
-  await homeWs.emitMessage({ type: 'hangup', callId: 'call-1' });
+  await homeWs.emitMessage(signalingContract.homeToServer.hangup({ callId: 'call-1' }));
   await flushAsync(2);
-  assert.deepEqual(intercomWs.sentMessages.at(-1), { type: 'hangup' });
+  assert.deepEqual(intercomWs.sentMessages.at(-1), signalingContract.serverToIntercom.hangup());
   assert.equal(harness.connectionStateMock.activeCall.get('intercom-1'), null);
   assert.deepEqual(harness.cancelRetryCalls, ['call-1', 'call-1']);
 });
@@ -199,22 +194,22 @@ test('first accept wins and later acceptors receive call-taken', async () => {
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
   await homeOneWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
   await homeTwoWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
-  await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
+  await intercomWs.emitMessage(signalingContract.intercomToServer.ring({ apartmentId: 'apt-1' }));
   await flushAsync(2);
 
-  await homeOneWs.emitMessage({ type: 'accept', userId: 'user-1' });
+  await homeOneWs.emitMessage(signalingContract.homeToServer.accept({ userId: 'user-1' }));
   await flushAsync(2);
-  assert.deepEqual(intercomWs.sentMessages.at(-1), { type: 'accept', callId: 'call-1' });
-  assert.deepEqual(homeTwoWs.sentMessages.at(-1), { type: 'call-taken', callId: 'call-1' });
+  assert.deepEqual(intercomWs.sentMessages.at(-1), signalingContract.serverToIntercom.accept({ callId: 'call-1' }));
+  assert.deepEqual(homeTwoWs.sentMessages.at(-1), signalingContract.serverToHome.callTaken({ callId: 'call-1' }));
 
   const acceptCountBeforeSecondAccept = intercomWs.sentMessages.filter((message) => message.type === 'accept').length;
-  await homeTwoWs.emitMessage({ type: 'accept', userId: 'user-2' });
+  await homeTwoWs.emitMessage(signalingContract.homeToServer.accept({ userId: 'user-2' }));
   await flushAsync();
-  assert.deepEqual(homeTwoWs.sentMessages.at(-1), { type: 'call-taken', callId: 'call-1' });
+  assert.deepEqual(homeTwoWs.sentMessages.at(-1), signalingContract.serverToHome.callTaken({ callId: 'call-1' }));
   const acceptCountAfterSecondAccept = intercomWs.sentMessages.filter((message) => message.type === 'accept').length;
   assert.equal(acceptCountAfterSecondAccept, acceptCountBeforeSecondAccept);
 
-  await homeOneWs.emitMessage({ type: 'hangup', callId: 'call-1' });
+  await homeOneWs.emitMessage(signalingContract.homeToServer.hangup({ callId: 'call-1' }));
   await flushAsync(2);
 });
 
@@ -230,11 +225,11 @@ test('WS accept reconciles a prior HTTP accept from the same user', async () => 
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
   await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
-  await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
+  await intercomWs.emitMessage(signalingContract.intercomToServer.ring({ apartmentId: 'apt-1' }));
   await flushAsync(2);
 
   assert.equal(harness.connectionStateMock.activeCall.httpAccept('intercom-1', 'user-1'), true);
-  await homeWs.emitMessage({ type: 'accept', userId: 'user-1' });
+  await homeWs.emitMessage(signalingContract.homeToServer.accept({ userId: 'user-1' }));
   await flushAsync(2);
 
   const call = harness.connectionStateMock.activeCall.get('intercom-1');
@@ -243,7 +238,7 @@ test('WS accept reconciles a prior HTTP accept from the same user', async () => 
   assert.deepEqual(harness.connectionStateMock.clearedAcceptTimers, ['call-1']);
   assert.equal(intercomWs.sentMessages.some((message) => message.type === 'accept'), false);
 
-  await homeWs.emitMessage({ type: 'hangup', callId: 'call-1' });
+  await homeWs.emitMessage(signalingContract.homeToServer.hangup({ callId: 'call-1' }));
   await flushAsync(2);
 });
 
@@ -259,7 +254,7 @@ test('ring expiry marks the call unanswered and clears in-memory state', async (
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
   await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
-  await intercomWs.emitMessage({ type: 'ring', apartmentId: 'apt-1' });
+  await intercomWs.emitMessage(signalingContract.intercomToServer.ring({ apartmentId: 'apt-1' }));
   await flushAsync(2);
 
   const expired = await harness.connectionStateMock.triggerPendingRingExpiry('apt-1');
@@ -284,17 +279,17 @@ test('watch start and watch end relay cleanly and clear watch state', async () =
 
   await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
   await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
-  await homeWs.emitMessage({ type: 'watch' });
+  await homeWs.emitMessage(signalingContract.homeToServer.watch());
   await flushAsync();
 
-  assert.deepEqual(intercomWs.sentMessages.at(-1), { type: 'watch' });
+  assert.deepEqual(intercomWs.sentMessages.at(-1), signalingContract.serverToIntercom.watch());
   const watchCall = harness.connectionStateMock.activeCall.get('intercom-1');
   assert.equal(watchCall.type, 'watch');
   assert.equal(watchCall.acceptedBy, 'connection-2');
 
-  await homeWs.emitMessage({ type: 'watch-end' });
+  await homeWs.emitMessage(signalingContract.homeToServer.watchEnd());
   await flushAsync();
-  assert.deepEqual(intercomWs.sentMessages.at(-1), { type: 'watch-end' });
+  assert.deepEqual(intercomWs.sentMessages.at(-1), signalingContract.serverToIntercom.watchEnd());
   assert.equal(harness.connectionStateMock.activeCall.get('intercom-1'), null);
 });
 
