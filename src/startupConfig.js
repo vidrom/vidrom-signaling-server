@@ -1,15 +1,14 @@
 const admin = require('firebase-admin');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
 const LOCAL_FIREBASE_PATH = path.join(__dirname, '..', 'service-account.json');
 const LOCAL_APN_KEY_PATH = path.join(__dirname, '..', 'apns-key.p8');
-const DEFAULT_STUN_SERVERS = [
+const DEFAULT_FALLBACK_STUN_SERVERS = [
   'stun:stun.l.google.com:19302',
   'stun:stun1.l.google.com:19302',
-  'stun:52.203.117.37:3478',
 ];
+const DEFAULT_TWILIO_NTS_TTL_SECONDS = 86400;
 
 function isProductionEnv(env = process.env) {
   return (env.NODE_ENV || 'development') === 'production';
@@ -36,6 +35,64 @@ function parseCsv(value, fallback = []) {
 function getLocalFallbackPath(filePath, allowFallback) {
   if (!allowFallback) return '';
   return fs.existsSync(filePath) ? filePath : '';
+}
+
+function normalizeIceServer(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+
+  const urls = entry.urls || entry.url;
+  if (!urls) return null;
+
+  const normalized = { urls };
+  if (entry.username) normalized.username = entry.username;
+  if (entry.credential) normalized.credential = entry.credential;
+  return normalized;
+}
+
+async function fetchTwilioIceServers(config) {
+  if (typeof fetch !== 'function') {
+    throw new Error('Global fetch is unavailable in this Node runtime.');
+  }
+
+  const { accountSid, authToken } = config.rtc.twilio;
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+  const response = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Tokens.json`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+      },
+      body: new URLSearchParams({
+        Ttl: String(config.rtc.ttlSeconds),
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const details = (await response.text()).trim();
+    throw new Error(
+      details
+        ? `Twilio token request failed with ${response.status}: ${details}`
+        : `Twilio token request failed with ${response.status}`
+    );
+  }
+
+  const payload = await response.json();
+  const iceServers = (payload.ice_servers || payload.iceServers || [])
+    .map(normalizeIceServer)
+    .filter(Boolean);
+
+  if (iceServers.length === 0) {
+    throw new Error('Twilio token response did not include any ICE servers.');
+  }
+
+  return {
+    iceServers,
+    ttlSeconds: config.rtc.ttlSeconds,
+    expiresAt: Math.floor(Date.now() / 1000) + config.rtc.ttlSeconds,
+  };
 }
 
 function buildStartupConfig(env = process.env) {
@@ -67,12 +124,15 @@ function buildStartupConfig(env = process.env) {
       production: parseBoolean(env.APN_PRODUCTION, isProduction),
     },
     rtc: {
-      host: env.TURN_HOST || env.TURN_PUBLIC_IP || '52.203.117.37',
-      port: parsePositiveInt(env.TURN_PORT || '3478', 3478),
-      realm: env.TURN_REALM || 'vidrom.com',
-      sharedSecret: env.TURN_SHARED_SECRET || '',
-      ttlSeconds: parsePositiveInt(env.TURN_TTL_SECONDS || '600', 600),
-      stunServers: parseCsv(env.STUN_SERVERS, DEFAULT_STUN_SERVERS),
+      ttlSeconds: parsePositiveInt(
+        env.TWILIO_NTS_TTL_SECONDS || String(DEFAULT_TWILIO_NTS_TTL_SECONDS),
+        DEFAULT_TWILIO_NTS_TTL_SECONDS
+      ),
+      fallbackStunServers: parseCsv(env.STUN_SERVERS, DEFAULT_FALLBACK_STUN_SERVERS),
+      twilio: {
+        accountSid: env.TWILIO_ACCOUNT_SID || '',
+        authToken: env.TWILIO_AUTH_TOKEN || '',
+      },
     },
   };
 }
@@ -101,9 +161,6 @@ function validateStartupConfig(env = process.env) {
     if (!config.apns.teamId) errors.push('APN_TEAM_ID is required in production.');
     if (!config.apns.bundleId) errors.push('APN_BUNDLE_ID is required in production.');
 
-    if (!config.rtc.sharedSecret) {
-      errors.push('TURN_SHARED_SECRET is required in production to issue runtime TURN credentials.');
-    }
   }
 
   if (errors.length > 0) {
@@ -136,40 +193,16 @@ function initializeFirebaseAdmin(env = process.env) {
   return admin.app();
 }
 
-function buildRtcConfig(env = process.env, clientType = 'mobile') {
+async function buildRtcConfig(env = process.env, _clientType = 'mobile') {
   const config = buildStartupConfig(env);
-  const iceServers = config.rtc.stunServers.map((urls) => ({ urls }));
-  const stunHost = `stun:${config.rtc.host}:${config.rtc.port}`;
 
-  if (!config.rtc.stunServers.includes(stunHost)) {
-    iceServers.push({ urls: stunHost });
+  if (!config.rtc.twilio.accountSid || !config.rtc.twilio.authToken) {
+    return {
+      iceServers: config.rtc.fallbackStunServers.map((urls) => ({ urls })),
+    };
   }
 
-  if (!config.rtc.sharedSecret) {
-    return { iceServers };
-  }
-
-  const expiresAt = Math.floor(Date.now() / 1000) + config.rtc.ttlSeconds;
-  const username = `${expiresAt}:${clientType}`;
-  const credential = crypto
-    .createHmac('sha1', config.rtc.sharedSecret)
-    .update(username)
-    .digest('base64');
-
-  iceServers.push({
-    urls: [
-      `turn:${config.rtc.host}:${config.rtc.port}?transport=udp`,
-      `turn:${config.rtc.host}:${config.rtc.port}?transport=tcp`,
-    ],
-    username,
-    credential,
-  });
-
-  return {
-    iceServers,
-    ttlSeconds: config.rtc.ttlSeconds,
-    expiresAt,
-  };
+  return fetchTwilioIceServers(config);
 }
 
 module.exports = {

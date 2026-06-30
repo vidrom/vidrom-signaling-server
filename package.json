@@ -7,7 +7,9 @@
     "lint": "npm exec --prefix .. eslint -- .",
     "start": "node src/server.js",
     "test": "node --test",
-    "test:coverage": "c8 --all --check-coverage --statements 40 --branches 47 --functions 66 --lines 40 --src src --src lambda --reporter=text --reporter=lcov --report-dir coverage --exclude \"test/**\" --exclude \"coverage/**\" node --test"
+    "test:coverage": "c8 --all --check-coverage --statements 40 --branches 47 --functions 66 --lines 40 --src src --src lambda --reporter=text --reporter=lcov --report-dir coverage --exclude \"test/**\" --exclude \"coverage/**\" node --test",
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:integration:coverage": "c8 --all --reporter=text --report-dir coverage/integration --exclude \"test/**\" --exclude \"coverage/**\" node --test test/integration/*.test.js"
   },
   "dependencies": {
     "@parse/node-apn": "^8.1.0",
@@ -20,6 +22,7 @@
   },
   "private": true,
   "devDependencies": {
-    "c8": "^10.1.3"
+    "c8": "^10.1.3",
+    "testcontainers": "^10.28.0"
   }
 }

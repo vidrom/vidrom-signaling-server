@@ -6,7 +6,7 @@ It owns:
 
 - the WebSocket signaling contract used by the mobile apps
 - push-triggered call fanout and accept reconciliation
-- runtime TURN credential generation via `/api/rtc-config`
+- runtime Twilio STUN/TURN credential generation via `/api/rtc-config`
 - resident/intercom/watch state transitions
 
 This repo is deployed in two contexts:
@@ -56,18 +56,15 @@ Required in production:
 - `APN_KEY_ID`
 - `APN_TEAM_ID`
 - `APN_BUNDLE_ID`
-- `TURN_SHARED_SECRET`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
 
 Optional runtime tuning:
 
 - `NODE_ENV`
 - `APN_PRODUCTION`
-- `TURN_HOST`
-- `TURN_PUBLIC_IP`
-- `TURN_PORT`
-- `TURN_REALM`
-- `TURN_TTL_SECONDS`
 - `STUN_SERVERS`
+- `TWILIO_NTS_TTL_SECONDS`
 
 In local development, the server can fall back to checked-out files when `NODE_ENV` is not `production`:
 
@@ -83,7 +80,7 @@ The EC2 service entrypoint is [run.sh](run.sh).
 It resolves secrets from AWS Secrets Manager and exports the env vars expected by `src/startupConfig.js`:
 
 - `DB_SECRET_ARN` is read for database credentials
-- `RUNTIME_SECRET_ARN` is read for JWT, TURN, and APNs runtime settings
+- `RUNTIME_SECRET_ARN` is read for JWT, Twilio, and APNs runtime settings
 - `FIREBASE_SERVICE_ACCOUNT_SECRET_ARN` is materialized to `service-account.json`
 - `APN_AUTH_KEY_SECRET_ARN` is materialized to `apns-key.p8`
 

@@ -462,3 +462,31 @@ test('scenario runner deletes stale push tokens when call-taken push fallback re
     runner.dispose();
   }
 });
+
+test('scenario runner reconciles a prior HTTP accept from the same resident without relaying a duplicate accept', async () => {
+  const runner = createScenarioRunner({
+    uuidValues: ['connection-1', 'connection-2', 'call-1'],
+  });
+
+  try {
+    const intercom = runner.createIntercom();
+    const home = runner.createHome();
+
+    await intercom.registerIntercom();
+    await home.registerHome();
+    await intercom.ring('apt-1');
+    await runner.flushAsync(2);
+
+    assert.equal(runner.seedHttpAccept('intercom-1', 'user-1'), true);
+
+    await home.accept({ callId: 'call-1', userId: 'user-1' });
+    await runner.flushAsync(2);
+
+    const call = runner.getActiveCall();
+    assert.equal(call.acceptedBy, 'connection-2');
+    assert.equal(call.acceptedWs, home.ws);
+    assert.equal(intercom.sentMessages.some((message) => message.type === 'accept'), false);
+  } finally {
+    runner.dispose();
+  }
+});

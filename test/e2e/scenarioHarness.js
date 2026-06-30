@@ -281,6 +281,9 @@ function createScenarioRunner(options = {}) {
     async triggerPendingRingExpiry(apartmentId = 'apt-1') {
       return server.connectionStateMock.triggerPendingRingExpiry(apartmentId);
     },
+    seedHttpAccept(intercomDeviceId = 'intercom-1', userId = 'user-1') {
+      return server.connectionStateMock.activeCall.httpAccept(intercomDeviceId, userId);
+    },
     getVoipPushCalls() {
       return server.voipPushCalls;
     },

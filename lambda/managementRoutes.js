@@ -190,8 +190,10 @@ async function createDevice(buildingIds, body) {
   if (err) return err;
   const provisioningCode = Math.floor(100000 + Math.random() * 900000).toString();
   const result = await query(
-    'INSERT INTO intercoms (building_id, name, gate_id) VALUES ($1, $2, $3) RETURNING *',
-    [building_id, name, gate_id || null]
+    `INSERT INTO intercoms (building_id, name, gate_id, provisioning_code, provisioning_status)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [building_id, name, gate_id || null, provisioningCode, 'pending']
   );
   return { ...result.rows[0], provisioning_code: provisioningCode };
 }

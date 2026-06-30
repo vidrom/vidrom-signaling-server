@@ -298,7 +298,7 @@ async function handleRequest(req, res) {
         const resident = await requireResident(req, res);
         if (!resident) return;
       }
-      jsonNoStore(res, buildRtcConfig(process.env, clientType));
+      jsonNoStore(res, await buildRtcConfig(process.env, clientType));
     } else if (req.method === 'POST' && urlPath === '/register-fcm-token') {
       const resident = await requireResident(req, res);
       if (!resident) return;
@@ -664,19 +664,52 @@ async function handleRequest(req, res) {
       // Send call-taken push to all registered tokens for the apartment
       try {
         const tokenResult = await query(
-          'SELECT token, token_type FROM device_tokens WHERE apartment_id = $1',
+          'SELECT token, token_type, platform, user_id FROM device_tokens WHERE apartment_id = $1',
           [callRow.apartment_id]
         );
         for (const row of tokenResult.rows) {
           if (row.token_type === 'voip' && isAPNsReady()) {
             sendVoipPush(row.token, 'call-taken', { type: 'call-taken', callId })
+              .then((result) => {
+                if (result.success) {
+                  return;
+                }
+                upsertDeviceHealthSignal({
+                  deviceToken: row.token,
+                  tokenType: row.token_type,
+                  userId: row.user_id || null,
+                  apartmentId: callRow.apartment_id,
+                  platform: row.platform || 'ios',
+                  lastPushFailure: new Date(),
+                  lastPushError: result.reason || 'push-failed',
+                }).catch((healthErr) => console.error('[HTTP] Error upserting device health for VoIP call-taken failure:', summarizeError(healthErr)));
+                if (result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') {
+                  query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'voip'", [row.token])
+                    .catch((deleteErr) => console.error('[HTTP] Failed to delete stale VoIP token (call-taken):', summarizeError(deleteErr)));
+                }
+              })
               .catch(err => console.error('[HTTP] call-taken VoIP push error:', summarizeError(err)));
           } else if (row.token_type === 'fcm') {
             admin.messaging().send({
               token: row.token,
               data: { type: 'call-taken', callId },
               android: { priority: 'high' },
-            }).catch(err => console.error('[HTTP] call-taken FCM error:', summarizeError(err)));
+            }).catch(err => {
+              upsertDeviceHealthSignal({
+                deviceToken: row.token,
+                tokenType: row.token_type,
+                userId: row.user_id || null,
+                apartmentId: callRow.apartment_id,
+                platform: row.platform || 'android',
+                lastPushFailure: new Date(),
+                lastPushError: err.message || 'push-failed',
+              }).catch((healthErr) => console.error('[HTTP] Error upserting device health for FCM call-taken failure:', summarizeError(healthErr)));
+              if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+                query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'fcm'", [row.token])
+                  .catch((deleteErr) => console.error('[HTTP] Failed to delete stale FCM token (call-taken):', summarizeError(deleteErr)));
+              }
+              console.error('[HTTP] call-taken FCM error:', summarizeError(err));
+            });
           }
         }
       } catch (err) {

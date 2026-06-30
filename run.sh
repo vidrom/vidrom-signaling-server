@@ -68,10 +68,15 @@ fi
 if [[ -n "${RUNTIME_SECRET_ARN:-}" ]]; then
 	RUNTIME_SECRET_JSON="$(fetch_secret_string "$RUNTIME_SECRET_ARN")"
 	export JWT_SECRET="$(read_secret_field "$RUNTIME_SECRET_JSON" JWT_SECRET jwtSecret)"
-	export TURN_SHARED_SECRET="$(read_secret_field "$RUNTIME_SECRET_JSON" TURN_SHARED_SECRET turnSharedSecret)"
+	export TWILIO_ACCOUNT_SID="$(read_secret_field "$RUNTIME_SECRET_JSON" TWILIO_ACCOUNT_SID twilioAccountSid)"
+	export TWILIO_AUTH_TOKEN="$(read_secret_field "$RUNTIME_SECRET_JSON" TWILIO_AUTH_TOKEN twilioAuthToken)"
 	export APN_KEY_ID="$(read_secret_field "$RUNTIME_SECRET_JSON" APN_KEY_ID apnKeyId)"
 	export APN_TEAM_ID="$(read_secret_field "$RUNTIME_SECRET_JSON" APN_TEAM_ID apnTeamId)"
 	export APN_BUNDLE_ID="$(read_secret_field "$RUNTIME_SECRET_JSON" APN_BUNDLE_ID apnBundleId)"
+
+	if TWILIO_NTS_TTL_VALUE="$(read_optional_secret_field "$RUNTIME_SECRET_JSON" TWILIO_NTS_TTL_SECONDS twilioNtsTtlSeconds)"; then
+		export TWILIO_NTS_TTL_SECONDS="$TWILIO_NTS_TTL_VALUE"
+	fi
 
 	if APN_PRODUCTION_VALUE="$(read_optional_secret_field "$RUNTIME_SECRET_JSON" APN_PRODUCTION apnProduction)"; then
 		export APN_PRODUCTION="$APN_PRODUCTION_VALUE"

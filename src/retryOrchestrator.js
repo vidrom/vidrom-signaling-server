@@ -8,6 +8,7 @@ const admin = require('firebase-admin');
 const { query } = require('./db');
 const { sendVoipPush, isAPNsReady } = require('./apnsService');
 const { getIntercom } = require('./connectionState');
+const { computeDeviceHealth } = require('./deviceHealthScore');
 
 // callId → { timers: [timeout...], cancelled: boolean }
 const retryState = new Map();
@@ -15,6 +16,111 @@ const retryState = new Map();
 // Default retry schedule (seconds after ring start)
 const RETRY_SCHEDULE = [3, 8];
 const FINAL_CHECK_SEC = 15;
+
+async function upsertDeviceHealthSignal({
+  deviceToken,
+  tokenType,
+  userId,
+  apartmentId,
+  platform,
+  lastSuccessfulPush,
+  lastPushFailure,
+  lastPushError,
+}) {
+  if (!deviceToken || !tokenType) return;
+
+  const existingResult = await query(
+    `SELECT * FROM device_health WHERE device_token = $1 AND token_type = $2 LIMIT 1`,
+    [deviceToken, tokenType]
+  );
+  const existing = existingResult.rows[0] || null;
+
+  const merged = {
+    user_id: userId || existing?.user_id || null,
+    apartment_id: apartmentId || existing?.apartment_id || null,
+    platform: platform || existing?.platform || (tokenType === 'voip' ? 'ios' : 'android'),
+    last_successful_push: lastSuccessfulPush !== undefined ? lastSuccessfulPush : (existing?.last_successful_push || null),
+    last_push_failure: lastPushFailure !== undefined ? lastPushFailure : (existing?.last_push_failure || null),
+    last_push_error: lastPushError !== undefined ? lastPushError : (existing?.last_push_error || null),
+    last_token_refresh: existing?.last_token_refresh || null,
+    last_ack_at: existing?.last_ack_at || null,
+    last_call_ack_event: existing?.last_call_ack_event || null,
+    notification_permission: existing?.notification_permission || 'unknown',
+    app_version: existing?.app_version || null,
+    os_version: existing?.os_version || null,
+  };
+
+  if (!merged.user_id || !merged.apartment_id || !merged.platform) {
+    return;
+  }
+
+  let hasAnyAck = !!merged.last_ack_at;
+  if (!hasAnyAck) {
+    const ackResult = await query(
+      `SELECT 1 FROM call_delivery_acks WHERE device_token = $1 LIMIT 1`,
+      [deviceToken]
+    );
+    hasAnyAck = ackResult.rows.length > 0;
+  }
+
+  const { health_score, health_status } = computeDeviceHealth({
+    lastPushFailed: !!merged.last_push_failure,
+    lastAckAt: merged.last_ack_at,
+    notificationPermission: merged.notification_permission,
+    hasAnyAck,
+  });
+
+  await query(
+    `INSERT INTO device_health (
+      device_token, token_type, user_id, apartment_id, platform,
+      last_successful_push, last_push_failure, last_push_error,
+      last_token_refresh, last_ack_at, last_call_ack_event,
+      notification_permission, app_version, os_version,
+      health_score, health_status, last_evaluated_at, updated_at
+    ) VALUES (
+      $1, $2, $3, $4, $5,
+      $6, $7, $8,
+      $9, $10, $11,
+      $12, $13, $14,
+      $15, $16, NOW(), NOW()
+    )
+    ON CONFLICT (device_token, token_type) DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      apartment_id = EXCLUDED.apartment_id,
+      platform = EXCLUDED.platform,
+      last_successful_push = EXCLUDED.last_successful_push,
+      last_push_failure = EXCLUDED.last_push_failure,
+      last_push_error = EXCLUDED.last_push_error,
+      last_token_refresh = EXCLUDED.last_token_refresh,
+      last_ack_at = EXCLUDED.last_ack_at,
+      last_call_ack_event = EXCLUDED.last_call_ack_event,
+      notification_permission = EXCLUDED.notification_permission,
+      app_version = EXCLUDED.app_version,
+      os_version = EXCLUDED.os_version,
+      health_score = EXCLUDED.health_score,
+      health_status = EXCLUDED.health_status,
+      last_evaluated_at = NOW(),
+      updated_at = NOW()`,
+    [
+      deviceToken,
+      tokenType,
+      merged.user_id,
+      merged.apartment_id,
+      merged.platform,
+      merged.last_successful_push,
+      merged.last_push_failure,
+      merged.last_push_error,
+      merged.last_token_refresh,
+      merged.last_ack_at,
+      merged.last_call_ack_event,
+      merged.notification_permission,
+      merged.app_version,
+      merged.os_version,
+      health_score,
+      health_status,
+    ]
+  );
+}
 
 /**
  * Start retry orchestration for a call.
@@ -130,8 +236,32 @@ async function retryUnackedDevices(callId, delaySec) {
               [state, callId, row.device_token, pushResult.success ? null : pushResult.reason]
             ).catch(e => console.error(`[RETRY] Error updating retry attempt:`, e.message));
             if (pushResult.success) {
+              upsertDeviceHealthSignal({
+                deviceToken: row.device_token,
+                tokenType: row.token_type,
+                userId: row.user_id || null,
+                apartmentId,
+                platform: row.platform || 'ios',
+                lastSuccessfulPush: new Date(),
+                lastPushFailure: null,
+                lastPushError: null,
+              }).catch(e => console.error(`[RETRY] Error upserting device health:`, e.message));
               console.log(`[RETRY] VoIP retry push sent (call=${callId}, attempt=${newAttempt})`);
             } else {
+              upsertDeviceHealthSignal({
+                deviceToken: row.device_token,
+                tokenType: row.token_type,
+                userId: row.user_id || null,
+                apartmentId,
+                platform: row.platform || 'ios',
+                lastPushFailure: new Date(),
+                lastPushError: pushResult.reason || 'push-failed',
+              }).catch(e => console.error(`[RETRY] Error upserting device health:`, e.message));
+              if (pushResult.reason === 'BadDeviceToken' || pushResult.reason === 'Unregistered') {
+                query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'voip'", [row.device_token])
+                  .then(() => console.log('[RETRY] Deleted stale VoIP token'))
+                  .catch((e) => console.error('[RETRY] Failed to delete stale VoIP token:', e.message));
+              }
               console.error(`[RETRY] VoIP retry push failed (call=${callId}): ${pushResult.reason}`);
             }
           })
@@ -156,6 +286,16 @@ async function retryUnackedDevices(callId, delaySec) {
                )`,
               [callId, row.device_token]
             ).catch(e => console.error(`[RETRY] Error updating FCM retry attempt:`, e.message));
+            upsertDeviceHealthSignal({
+              deviceToken: row.device_token,
+              tokenType: row.token_type,
+              userId: row.user_id || null,
+              apartmentId,
+              platform: row.platform || 'android',
+              lastSuccessfulPush: new Date(),
+              lastPushFailure: null,
+              lastPushError: null,
+            }).catch(e => console.error(`[RETRY] Error upserting device health:`, e.message));
             console.log(`[RETRY] FCM retry push sent (call=${callId}, attempt=${newAttempt})`);
           })
           .catch(err => {
@@ -166,6 +306,20 @@ async function retryUnackedDevices(callId, delaySec) {
                )`,
               [callId, row.device_token, err.message]
             ).catch(e => console.error(`[RETRY] Error updating FCM retry attempt:`, e.message));
+            upsertDeviceHealthSignal({
+              deviceToken: row.device_token,
+              tokenType: row.token_type,
+              userId: row.user_id || null,
+              apartmentId,
+              platform: row.platform || 'android',
+              lastPushFailure: new Date(),
+              lastPushError: err.message || 'push-failed',
+            }).catch(e => console.error(`[RETRY] Error upserting device health:`, e.message));
+            if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+              query("DELETE FROM device_tokens WHERE token = $1 AND token_type = 'fcm'", [row.device_token])
+                .then(() => console.log('[RETRY] Deleted stale FCM token'))
+                .catch((e) => console.error('[RETRY] Failed to delete stale FCM token:', e.message));
+            }
             console.error(`[RETRY] FCM retry push failed (call=${callId}): ${err.message}`);
           });
       }

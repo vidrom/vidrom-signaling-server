@@ -112,8 +112,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     event_type      VARCHAR(30) NOT NULL CHECK (event_type IN (
         'call-initiated', 'call-accepted', 'call-rejected', 'call-ended',
-        'call-unanswered', 'door-open', 'access-code-success',
-        'access-code-failure', 'watch-camera-started'
+        'call-unanswered', 'accept-timeout', 'door-open', 'access-code-success',
+        'access-code-failure', 'watch-camera-started', 'late-join-ring',
+        'late-join-call-taken', 'ring-skipped-sleep-mode', 'delivery-degraded'
     )),
     building_id     UUID REFERENCES buildings(id),
     apartment_id    UUID REFERENCES apartments(id),
