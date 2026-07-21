@@ -392,7 +392,9 @@ function handleConnection(ws) {
         const prevCall = activeCall.get(deviceId);
         if (prevCall && prevCall.type === 'watch') {
           if (prevCall.acceptedWs && prevCall.acceptedWs.readyState === 1) {
-            prevCall.acceptedWs.send(JSON.stringify({ type: 'watch-end' }));
+            // Tag the reason so the home client knows to keep this same WebSocket
+            // open — the ring for this apartment is about to be sent on it.
+            prevCall.acceptedWs.send(JSON.stringify({ type: 'watch-end', reason: 'call-incoming' }));
             console.log(`[${id}] Ended active watch session for incoming ring`);
           }
           activeCall.clear(deviceId);

@@ -293,6 +293,35 @@ test('watch start and watch end relay cleanly and clear watch state', async () =
   assert.equal(harness.connectionStateMock.activeCall.get('intercom-1'), null);
 });
 
+test('an incoming ring preempts an active watch and still reaches the same home connection', async () => {
+  const harness = createWsHandlerHarness({
+    uuidValues: ['connection-1', 'connection-2', 'call-1'],
+  });
+
+  const intercomWs = new FakeWebSocket('intercom');
+  const homeWs = new FakeWebSocket('home');
+  harness.handleConnection(intercomWs);
+  harness.handleConnection(homeWs);
+
+  await intercomWs.emitMessage({ type: 'register', role: 'intercom', token: 'valid-token' });
+  await homeWs.emitMessage({ type: 'register', role: 'home', apartmentId: 'apt-1', token: 'resident-token' });
+  await homeWs.emitMessage(signalingContract.homeToServer.watch());
+  await flushAsync();
+
+  assert.equal(harness.connectionStateMock.activeCall.get('intercom-1').type, 'watch');
+
+  await intercomWs.emitMessage(signalingContract.intercomToServer.ring({ apartmentId: 'apt-1' }));
+  await flushAsync(2);
+
+  // The watch is torn down with a reason the home client uses to keep this
+  // same connection open instead of disconnecting before the ring arrives.
+  const watchEndMessage = homeWs.sentMessages.find((message) => message.type === 'watch-end');
+  assert.deepEqual(watchEndMessage, signalingContract.serverToHome.watchEnd({ reason: 'call-incoming' }));
+  assert.equal(homeWs.closed, false);
+  assert.deepEqual(homeWs.sentMessages.at(-1), signalingContract.serverToHome.ring({ callId: 'call-1' }));
+  assert.equal(harness.connectionStateMock.activeCall.get('intercom-1').type, 'call');
+});
+
 test('known bad push errors clean up stale FCM and VoIP tokens', async () => {
   const harness = createWsHandlerHarness({
     uuidValues: ['connection-1', 'call-1'],
