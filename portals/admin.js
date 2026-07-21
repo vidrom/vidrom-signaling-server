@@ -10,6 +10,7 @@ let cachedUsers = [];
 window.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', handleClick);
   document.getElementById('aptBldgSelect').addEventListener('change', loadApartmentsSection);
+  document.getElementById('devBldgSelect').addEventListener('change', loadDevices);
   document.getElementById('editModal').addEventListener('click', (event) => {
     if (event.target === document.getElementById('editModal')) closeModal();
   });
@@ -628,13 +629,18 @@ async function deleteUser(id) {
 async function loadDevices() {
   const data = await apiCall('/api/admin/devices');
   if (!data) return;
-  if (data.length === 0) {
-    document.getElementById('devicesTable').innerHTML = '<div class="empty-state">No intercoms yet.</div>';
+  const selectedBuildingId = document.getElementById('devBldgSelect')?.value || '';
+  const filteredDevices = selectedBuildingId
+    ? data.filter((device) => String(device.building_id) === selectedBuildingId)
+    : data;
+
+  if (filteredDevices.length === 0) {
+    document.getElementById('devicesTable').innerHTML = `<div class="empty-state">${selectedBuildingId ? 'No intercoms in this building.' : 'No intercoms yet.'}</div>`;
     return;
   }
 
   let html = '<table><thead><tr><th>Name</th><th>Building</th><th>Gate ID</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
-  for (const device of data) {
+  for (const device of filteredDevices) {
     html += `<tr>
       <td>${esc(device.name)}</td>
       <td>${esc(device.building_name)}</td>

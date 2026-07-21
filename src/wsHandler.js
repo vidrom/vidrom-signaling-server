@@ -303,7 +303,7 @@ function handleConnection(ws) {
           buildingId = apartment?.buildingId || residentContext.buildingIds[0] || null;
           const intercom = buildingId ? getIntercomForBuilding(buildingId) : null;
           intercomDeviceId = intercom?.deviceId || null;
-          addHomeClient(apartmentId, id, ws, buildingId);
+          addHomeClient(apartmentId, id, ws, buildingId, residentContext.userId);
           console.log(`[${id}] Home authenticated for apartment=${apartmentId}, building=${buildingId}, intercom=${intercomDeviceId || 'none'}`);
 
           if (clients.home === ws) {
@@ -324,7 +324,8 @@ function handleConnection(ws) {
               "INSERT INTO audit_logs (event_type, building_id, apartment_id, call_id, description) VALUES ('late-join-ring', $1, $2, $3, 'Device late-joined active ringing call')",
               [buildingId, apartmentId, pendingCallInfo.callId || null]
             ).catch(e => console.error('[DB] late-join audit_log:', e.message));
-          } else if (pendingCallInfo && pendingCallInfo.acceptedBy) {
+          } else if (pendingCallInfo && pendingCallInfo.acceptedBy &&
+            !(pendingCallInfo.httpAcceptedBy && pendingCallInfo.httpAcceptedBy === residentContext.userId)) {
             // Call already accepted by another device
             console.log(`[${id}] Late-join: call already accepted callId=${pendingCallInfo.callId} — sending call-taken (apartment=${apartmentId})`);
             ws.send(JSON.stringify({ type: 'call-taken', callId: pendingCallInfo.callId || null }));

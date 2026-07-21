@@ -3,6 +3,12 @@
 set -euo pipefail
 umask 077
 
+export AWS_PAGER=""
+export PAGER=cat
+export GIT_PAGER=cat
+export SYSTEMD_PAGER=cat
+export LESS='-FRX'
+
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 RUNTIME_SECRETS_DIR="${RUNTIME_SECRETS_DIR:-/run/vidrom-signaling}"

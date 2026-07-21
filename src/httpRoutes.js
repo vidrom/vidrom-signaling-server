@@ -20,6 +20,35 @@ const { hashDoorCode, normalizeDoorCode, verifyDoorCode } = require('./doorCode'
 const { checkHttpRateLimit, rateLimitHeaders } = require('./rateLimit');
 
 const MAX_JSON_BODY_BYTES = Number.parseInt(process.env.MAX_JSON_BODY_BYTES || '32768', 10);
+const configuredDoorCodeCacheTtlMs = Number.parseInt(process.env.DOOR_CODE_CACHE_TTL_MS || '300000', 10);
+const DOOR_CODE_CACHE_TTL_MS = Number.isFinite(configuredDoorCodeCacheTtlMs) && configuredDoorCodeCacheTtlMs > 0
+  ? configuredDoorCodeCacheTtlMs
+  : 300000;
+const doorCodeCache = new Map();
+
+function getCachedDoorCodeVerifier(intercomId) {
+  const entry = doorCodeCache.get(intercomId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    doorCodeCache.delete(intercomId);
+    return null;
+  }
+  return { door_code: null, door_code_hash: entry.door_code_hash };
+}
+
+function cacheDoorCodeVerifier(intercomId, intercom) {
+  if (!intercom) return;
+  const normalizedCode = intercom.door_code_hash ? null : normalizeDoorCode(intercom.door_code);
+  const doorCodeHash = intercom.door_code_hash || (normalizedCode ? hashDoorCode(normalizedCode) : null);
+  if (!doorCodeHash) {
+    doorCodeCache.delete(intercomId);
+    return;
+  }
+  doorCodeCache.set(intercomId, {
+    door_code_hash: doorCodeHash,
+    expiresAt: Date.now() + DOOR_CODE_CACHE_TTL_MS,
+  });
+}
 
 // Helper to read JSON body from request
 function createHttpError(status, message) {
@@ -131,6 +160,46 @@ function redactClientText(value) {
   return String(value)
     .replace(/Bearer\s+[A-Za-z0-9._~+\-/]+=*/gi, 'Bearer [REDACTED]')
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
+}
+
+async function insertClientLogEntry({
+  app,
+  errorType,
+  message,
+  stack,
+  context,
+  platform,
+  os_version,
+  app_version,
+  device_model,
+  user_id,
+  user_email,
+  apartment_id,
+  building_id,
+  intercom_id,
+}) {
+  await query(
+    `INSERT INTO client_errors (app, error_type, message, stack, context,
+       platform, os_version, app_version, device_model,
+       user_id, user_email, apartment_id, building_id, intercom_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+    [
+      app,
+      truncateText(errorType, 80),
+      truncateText(redactClientText(message), 2000),
+      truncateText(redactClientText(stack), 4000),
+      context ? truncateText(redactClientText(JSON.stringify(context)), 4000) : null,
+      platform || null,
+      os_version || null,
+      app_version || null,
+      device_model || null,
+      user_id || null,
+      user_email || null,
+      apartment_id || null,
+      building_id || null,
+      intercom_id || null,
+    ]
+  );
 }
 
 async function upsertDeviceHealthSignal({
@@ -413,16 +482,55 @@ async function handleRequest(req, res) {
         json(res, { error: 'Invalid app' }, 400);
         return;
       }
-      await query(
-        `INSERT INTO client_errors (app, error_type, message, stack, context,
-           platform, os_version, app_version, device_model,
-           user_id, user_email, apartment_id, building_id, intercom_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [app, truncateText(error_type, 80), truncateText(redactClientText(errMsg), 2000), truncateText(redactClientText(stack), 4000), context ? truncateText(redactClientText(JSON.stringify(context)), 4000) : null,
-         platform || null, os_version || null, app_version || null, device_model || null,
-         user_id || null, user_email || null, apartment_id || null, building_id || null, intercom_id || null]
-      );
+      await insertClientLogEntry({
+        app,
+        errorType: error_type,
+        message: errMsg,
+        stack,
+        context,
+        platform,
+        os_version,
+        app_version,
+        device_model,
+        user_id,
+        user_email,
+        apartment_id,
+        building_id,
+        intercom_id,
+      });
       console.log(`[HTTP] Client error logged: app=${app} type=${error_type}`);
+      json(res, { ok: true });
+
+    } else if (req.method === 'POST' && urlPath === '/api/client-debug-event') {
+      const body = await readBody(req);
+      const { app, event_type, message: rawMessage, context,
+              platform, os_version, app_version, device_model,
+              user_id, user_email, apartment_id, building_id, intercom_id } = body;
+      if (!app || !event_type) {
+        json(res, { error: 'app and event_type are required' }, 400);
+        return;
+      }
+      if (!['home', 'intercom'].includes(app)) {
+        json(res, { error: 'Invalid app' }, 400);
+        return;
+      }
+      await insertClientLogEntry({
+        app,
+        errorType: `debug:${event_type}`,
+        message: rawMessage || event_type,
+        stack: null,
+        context,
+        platform,
+        os_version,
+        app_version,
+        device_model,
+        user_id,
+        user_email,
+        apartment_id,
+        building_id,
+        intercom_id,
+      });
+      console.log(`[HTTP] Client debug event logged: app=${app} event=${event_type}`);
       json(res, { ok: true });
 
     } else if (req.method === 'POST' && urlPath.startsWith('/api/home/calls/') && urlPath.endsWith('/ack')) {
@@ -579,17 +687,28 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const { code } = body;
       if (!code) { json(res, { error: 'Code required' }, 400); return; }
-      const result = await query(
-        `SELECT door_code, door_code_hash FROM intercoms WHERE id = $1`,
-        [device.deviceId]
-      );
-      const intercom = result.rows[0];
+      let intercom = getCachedDoorCodeVerifier(device.deviceId);
+      const usingCachedVerifier = Boolean(intercom);
+      if (!intercom) {
+        try {
+          const result = await query(
+            `SELECT door_code, door_code_hash FROM intercoms WHERE id = $1`,
+            [device.deviceId]
+          );
+          intercom = result.rows[0];
+          cacheDoorCodeVerifier(device.deviceId, intercom);
+        } catch (err) {
+          intercom = getCachedDoorCodeVerifier(device.deviceId);
+          if (!intercom) throw err;
+          console.warn('[HTTP] Door-code DB lookup failed; using cached verifier:', summarizeError(err));
+        }
+      }
       if (!intercom || (!intercom.door_code && !intercom.door_code_hash)) { json(res, { valid: false }, 200); return; }
       const normalizedCode = normalizeDoorCode(code);
       const valid = intercom.door_code_hash
         ? verifyDoorCode(normalizedCode, intercom.door_code_hash)
         : normalizeDoorCode(intercom.door_code) === normalizedCode;
-      if (valid && !intercom.door_code_hash) {
+      if (valid && !intercom.door_code_hash && !usingCachedVerifier) {
         await query('UPDATE intercoms SET door_code_hash = $1, door_code = NULL WHERE id = $2', [hashDoorCode(normalizedCode), device.deviceId]);
       }
       json(res, { valid });
@@ -653,10 +772,10 @@ async function handleRequest(req, res) {
         intercom.ws.send(JSON.stringify({ type: 'accept', callId }));
       }
 
-      // Send call-taken to all connected home WS clients
+      // Notify other residents, but never the resident who just accepted via HTTP.
       const aptClients = getHomeClients(callRow.apartment_id);
       for (const [, entry] of aptClients) {
-        if (entry.ws.readyState === 1) {
+        if (entry.userId !== resident.userId && entry.ws.readyState === 1) {
           entry.ws.send(JSON.stringify({ type: 'call-taken', callId }));
         }
       }
@@ -664,8 +783,8 @@ async function handleRequest(req, res) {
       // Send call-taken push to all registered tokens for the apartment
       try {
         const tokenResult = await query(
-          'SELECT token, token_type, platform, user_id FROM device_tokens WHERE apartment_id = $1',
-          [callRow.apartment_id]
+          'SELECT token, token_type, platform, user_id FROM device_tokens WHERE apartment_id = $1 AND (user_id IS NULL OR user_id <> $2)',
+          [callRow.apartment_id, resident.userId]
         );
         for (const row of tokenResult.rows) {
           if (row.token_type === 'voip' && isAPNsReady()) {

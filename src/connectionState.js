@@ -38,14 +38,14 @@ const clients = {
   home: null,
 };
 
-// ---- Home clients: apartmentId → Map<connectionId, { ws, buildingId }> ----
+// ---- Home clients: apartmentId → Map<connectionId, { ws, buildingId, userId }> ----
 const homeClients = new Map();
 
-function addHomeClient(apartmentId, connId, ws, buildingId) {
+function addHomeClient(apartmentId, connId, ws, buildingId, userId = null) {
   if (!homeClients.has(apartmentId)) {
     homeClients.set(apartmentId, new Map());
   }
-  homeClients.get(apartmentId).set(connId, { ws, buildingId });
+  homeClients.get(apartmentId).set(connId, { ws, buildingId, userId });
 }
 
 function removeHomeClient(apartmentId, connId) {

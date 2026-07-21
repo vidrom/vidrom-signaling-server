@@ -57,6 +57,7 @@ function getRouteBucket(method, urlPath) {
   if (method === 'POST' && urlPath === '/api/devices/provision') return 'provisioning';
   if (method === 'GET' && urlPath === '/api/rtc-config') return 'rtcConfig';
   if (method === 'POST' && urlPath === '/api/client-error') return 'clientError';
+  if (method === 'POST' && urlPath === '/api/client-debug-event') return 'clientError';
   if (urlPath === '/debug/status') return 'debug';
   if (urlPath === '/decline' || /^\/api\/home\/calls\/[^/]+\/(?:ack|accept)$/.test(urlPath)) return 'callAction';
   return null;

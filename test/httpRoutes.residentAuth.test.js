@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 
+const { hashDoorCode } = require('../src/doorCode');
 const { requireWithMocks } = require('./wsTestHarness');
 
 function createRequest({ method = 'GET', url = '/', headers = {}, body, rawBody } = {}) {
@@ -213,6 +214,82 @@ test('intercom door-code verification never discloses expected code', async () =
   assert.deepEqual(JSON.parse(res.body), { valid: false });
 });
 
+test('intercom door-code verification uses cached hash without repeated DB lookup', async () => {
+  const storedHash = hashDoorCode('123456', { iterations: 1, salt: 'door-cache-test' });
+  let selectCount = 0;
+  const harness = createHandleRequestHarness({
+    queryImpl(sql) {
+      if (sql.includes('SELECT door_code, door_code_hash FROM intercoms')) {
+        selectCount += 1;
+        return { rows: [{ door_code: null, door_code_hash: storedHash }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  });
+
+  const firstReq = createRequest({
+    method: 'POST',
+    url: '/api/intercom/verify-door-code',
+    headers: { authorization: 'Bearer device-token' },
+    body: { code: '123456' },
+  });
+  const firstRes = createResponse();
+  await harness.handleRequest(firstReq, firstRes);
+
+  const secondReq = createRequest({
+    method: 'POST',
+    url: '/api/intercom/verify-door-code',
+    headers: { authorization: 'Bearer device-token' },
+    body: { code: '123456' },
+  });
+  const secondRes = createResponse();
+  await harness.handleRequest(secondReq, secondRes);
+
+  assert.equal(firstRes.statusCode, 200);
+  assert.deepEqual(JSON.parse(firstRes.body), { valid: true });
+  assert.equal(secondRes.statusCode, 200);
+  assert.deepEqual(JSON.parse(secondRes.body), { valid: true });
+  assert.equal(selectCount, 1);
+});
+
+test('intercom door-code cached verifier still rejects wrong codes', async () => {
+  const storedHash = hashDoorCode('123456', { iterations: 1, salt: 'door-cache-wrong-test' });
+  let selectCount = 0;
+  const harness = createHandleRequestHarness({
+    queryImpl(sql) {
+      if (sql.includes('SELECT door_code, door_code_hash FROM intercoms')) {
+        selectCount += 1;
+        return { rows: [{ door_code: null, door_code_hash: storedHash }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  });
+
+  const warmReq = createRequest({
+    method: 'POST',
+    url: '/api/intercom/verify-door-code',
+    headers: { authorization: 'Bearer device-token' },
+    body: { code: '123456' },
+  });
+  const warmRes = createResponse();
+  await harness.handleRequest(warmReq, warmRes);
+
+  const fallbackReq = createRequest({
+    method: 'POST',
+    url: '/api/intercom/verify-door-code',
+    headers: { authorization: 'Bearer device-token' },
+    body: { code: '000000' },
+  });
+  const fallbackRes = createResponse();
+  await harness.handleRequest(fallbackReq, fallbackRes);
+
+  assert.equal(warmRes.statusCode, 200);
+  assert.deepEqual(JSON.parse(warmRes.body), { valid: true });
+  assert.equal(fallbackRes.statusCode, 200);
+  assert.deepEqual(JSON.parse(fallbackRes.body), { valid: false });
+  assert.equal(selectCount, 1);
+});
+
 test('oversized JSON body is rejected before route handling', async () => {
   const harness = createHandleRequestHarness({
     queryImpl() {
@@ -231,6 +308,35 @@ test('oversized JSON body is rejected before route handling', async () => {
 
   assert.equal(res.statusCode, 413);
   assert.deepEqual(JSON.parse(res.body), { error: 'Request body too large' });
+});
+
+test('client-debug-event inserts a structured debug entry', async () => {
+  const harness = createHandleRequestHarness({
+    queryImpl(sql, params) {
+      assert.match(sql, /INSERT INTO client_errors/);
+      assert.equal(params[0], 'intercom');
+      assert.equal(params[1], 'debug:ws-connected');
+      assert.equal(params[2], 'ws-connected');
+      assert.equal(params[4], '{"hasDeviceToken":true}');
+      return { rows: [] };
+    },
+  });
+
+  const req = createRequest({
+    method: 'POST',
+    url: '/api/client-debug-event',
+    body: {
+      app: 'intercom',
+      event_type: 'ws-connected',
+      context: { hasDeviceToken: true },
+    },
+  });
+  const res = createResponse();
+
+  await harness.handleRequest(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), { ok: true });
 });
 
 test('resolve-apartment returns 401 without resident bearer auth', async () => {

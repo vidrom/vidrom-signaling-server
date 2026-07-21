@@ -15,7 +15,7 @@ async function validateProvisioningCode(code) {
     `UPDATE intercoms SET provisioning_status = 'active', provisioning_code = NULL
      WHERE provisioning_code = $1
        AND provisioning_status = 'pending'
-       AND created_at >= NOW() - ($2::text || ' hours')::interval
+       AND updated_at >= NOW() - ($2::text || ' hours')::interval
      RETURNING id AS "deviceId", building_id AS "buildingId", name, provisioning_status AS status`,
     [code.trim(), ttlHours]
   );
